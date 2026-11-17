@@ -16,8 +16,8 @@ import pytest
 
 pytestmark = pytest.mark.gpu_proof
 
-import crocket
-from crocket import cuda, harness
+import mantis
+from mantis import cuda, harness
 from robots import SMALL, options, robot
 
 ALGORITHMS = ["rnea", "crba", "aba", "rnea_derivatives", "frame_poses", "frame_jacobian",
@@ -35,7 +35,7 @@ def _each(p, flags=("-O3",), dtype=np.float32, **kw):
 
 def _trace(robot_name, name):
     r = robot(robot_name)
-    return crocket.trace(r, name, **options(r, name))
+    return mantis.trace(r, name, **options(r, name))
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -56,6 +56,64 @@ def test_tiers_bit_identical_without_fma(robot_name, name):
         got, _ = b.run(0, x)
         for k in ref:
             np.testing.assert_array_equal(got[k], ref[k], err_msg=f"{b.cases[0][1]} {k}")
+
+
+@pytest.mark.parametrize("robot_name,order,mode", [("panda", 1, "forward"), ("panda", 1, "reverse"),
+                                                   ("panda", 2, "forward"), ("panda", 2, "reverse"),
+                                                   ("grid_go2", 2, "forward")])
+def test_derivative_programs(robot_name, order, mode):
+    """mantis.ad output is an ordinary trace: every tier against the interpreter, bit-identical
+    across tiers, and -O0 against -O3 with the stage split forced."""
+    p = mantis.trace(robot(robot_name), "rnea", order=order, wrt=("q", "qd"), ad_mode=mode)
+    built = _each(p, flags=("-O3", "-fmad=false"))
+    slow = _each(p, flags=("-O3", "-fmad=false", "-Xptxas=-O0"))
+    x = harness.sample_inputs(p, 97)
+    ref, _ = built[0].run(0, x)
+    for b, sl in zip(built, slow):
+        harness.validate(b)
+        got, _ = b.run(0, x)
+        low, _ = sl.run(0, x)
+        for k in ref:
+            np.testing.assert_array_equal(got[k], ref[k], err_msg=f"{b.cases[0][1]} {k}")
+            np.testing.assert_array_equal(low[k], ref[k], err_msg=f"-O0 {b.cases[0][1]} {k}")
+
+
+@pytest.mark.parametrize("robot_name,name,frac", [("panda", "rnea_derivatives", 0.7), ("grid_g1", "rnea", 0.9)])
+def test_fitted_schedules(robot_name, name, frac, monkeypatch):
+    """A P = 32 schedule squeezed under a shared-memory budget (schedule.build's levers) still
+    matches the interpreter and is bit-identical to the thread tier."""
+    p = _trace(robot_name, name)
+    variants = [cuda.Variant("block", 128, problems=32, fit=True), cuda.Variant("block", 256, problems=32, fit=True),
+                cuda.Variant("warp", 32, problems=32, fit=True)]
+    key = lambda v: (v.tier, v.units)  # noqa: E731
+    base = {key(v): mantis.schedule.build(p, max(v.units // 32, 1), v.threshold).n_slots for v in variants}
+    monkeypatch.setattr(cuda, "max_slots", lambda v, itemsize, dev=None: int(base[key(v)] * frac))
+    ref = harness.build([(p, cuda.Variant("thread"))], flags=("-O3", "-fmad=false"))
+    x = harness.sample_inputs(p, 97)
+    want, _ = ref.run(0, x)
+    for v in variants:
+        sc = mantis.schedule.build(p, max(v.units // 32, 1), v.threshold, max_slots=int(base[key(v)] * frac))
+        assert sc.fits and sc.lever, (v, sc.n_slots, base[key(v)])
+        b = harness.build([(p, v)], flags=("-O3", "-fmad=false"))
+        harness.validate(b)
+        got, _ = b.run(0, x)
+        for k in want:
+            np.testing.assert_array_equal(got[k], want[k], err_msg=f"{v} {sc.lever} {k}")
+
+
+@pytest.mark.parametrize("robot_name,name", [("grid_g1", "rnea_derivatives"), ("grid_g1", "sphere_collision")])
+def test_thread_chunks_reordered(robot_name, name):
+    """The thread tier's Sethi-Ullman chunks with shared scratch slots, over budget, against the
+    interpreter and -O0 against -O3."""
+    p = _trace(robot_name, name)
+    fast = harness.build([(p, cuda.Variant("thread"))], flags=("-O3", "-fmad=false"), budget=2000)
+    slow = harness.build([(p, cuda.Variant("thread"))], flags=("-O3", "-fmad=false", "-Xptxas=-O0"), budget=2000)
+    harness.validate(fast)
+    x = harness.sample_inputs(p, 64)
+    a, _ = fast.run(0, x)
+    b, _ = slow.run(0, x)
+    for k in a:
+        np.testing.assert_array_equal(a[k], b[k])
 
 
 @pytest.mark.parametrize("robot_name,name", [("panda", "rnea"), ("grid_go2", "crba"), ("fr3", "rnea_derivatives")])
@@ -123,7 +181,7 @@ def test_unsplit_sphere_collision(robot_name):
 
 
 def test_tune_picks_a_validated_layout_and_caches_it():
-    from crocket import tune
+    from mantis import tune
 
     p = _trace("panda", "rnea")
     best = tune.tune(p, 256, reps=5, refresh=True)
@@ -146,7 +204,7 @@ def test_register_guard_removes_spills(robot_name):
 def test_layouts_stay_on_the_grid():
     """k (warps) and P (problems per warp) outside cuda.WARPS / cuda.PROBLEMS are rejected, and
     the tuner never proposes one."""
-    from crocket import tune
+    from mantis import tune
 
     p = _trace("panda", "rnea")
     for bad in (cuda.Variant("block", 96), cuda.Variant("block", 512), cuda.Variant("block", 48),

@@ -1,7 +1,7 @@
-# AGENTS.md: crocket
+# AGENTS.md: mantis
 
-crocket compiles rigid-body algorithms into robot-specific CUDA. You write an algorithm once in
-Python. crocket traces it for one robot and emits a header with thread, warp, and block versions.
+mantis compiles rigid-body algorithms into robot-specific CUDA. You write an algorithm once in
+Python. mantis traces it for one robot and emits a header with thread, warp, and block versions.
 GRiM uses it for `traced=True` kinematics and for `grim.motion.dynamics`.
 
 ## How it works
@@ -37,8 +37,8 @@ GRiM uses it for `traced=True` kinematics and for `grim.motion.dynamics`.
    - Functions over the statement budget become `__noinline__` stages. ptxas at -O2/-O3 has
      silently miscompiled huge straight-line traces, and this keeps each function small.
 
-4. **Robot-specific header**. `crocket.generate(robot, {...})` emits one header per robot,
-   `namespace crocket::robots::<name>`, with these functions:
+4. **Robot-specific header**. `mantis.generate(robot, {...})` emits one header per robot,
+   `namespace mantis::robots::<name>`, with these functions:
    - `<alg>_thread`: one problem per thread.
    - `<alg>_warp`: one warp (one rank) holding P problems (`Variant.problems`).
    - `<alg>_block`: `units / 32` warps (the ranks) holding P problems.
@@ -54,19 +54,19 @@ GRiM uses it for `traced=True` kinematics and for `grim.motion.dynamics`.
 
    The functions are templated on `T` and write outputs as `y[i * ys]`. The cooperative tiers
    end without a barrier. `tune.py` times candidate layouts and caches the winner under
-   `~/.cache/crocket`.
+   `~/.cache/mantis`.
 
-## When to use crocket vs GLASS vs GRiD/GRiM hand-written kernels
+## When to use mantis vs GLASS vs GRiD/GRiM hand-written kernels
 
 | Use | When |
 |---|---|
-| **crocket** | Robot-specific rigid-body math (FK, Jacobians, dynamics) at **large batch**, with one problem per thread. Specializing for the robot removes loops, branches, constant loads and zero products. Also use it when one algorithm source should produce several tiers. |
+| **mantis** | Robot-specific rigid-body math (FK, Jacobians, dynamics) at **large batch**, with one problem per thread. Specializing for the robot removes loops, branches, constant loads and zero products. Also use it when one algorithm source should produce several tiers. |
 | **GLASS** | Linear algebra that does not depend on the robot: Cholesky, GEMM, reductions. It is already templated on compile-time `N`, so tracing adds nothing. Traced code calls into it, as `fd_crba` does with GLASS Cholesky. |
-| **GRiD (via GRiM `generated_dynamics`)** | **Small batch on high-DOF robots** (latency), derivatives at small batch, runtime inertia, external forces, and second order (IDSVA). crocket folds inertias into constants and does not implement second order. |
-| **GRiM hand-written motion kernels** | Solver control flow that branches on data: iteration loops, accept/reject, early exit, convergence. The fixed-size math inside each iteration (FK, Jacobian, residual, the damped solve, the limit projection, collision terms) should be a traced crocket algorithm, not hand-written code calling traced FK through `kernels/robot.cuh` (`traced=True`). That swap alone gained 1.2-3x on IK; tracing the whole step gained 13-74x (see `benchmarks/README.md` on the `benchmarks` branch). GRiM's IK is built this way (`kernels/ik_crocket`: CUDA solver loops over `ik_geometry`), a median 13x over the hand-written kernels it replaced (GRiM `test/benchmarks/IK_RESULTS.md`). |
+| **GRiD (via GRiM `generated_dynamics`)** | **Small batch on high-DOF robots** (latency), derivatives at small batch, runtime inertia, external forces, and second order (IDSVA). mantis folds inertias into constants and does not implement second order. |
+| **GRiM hand-written motion kernels** | Solver control flow that branches on data: iteration loops, accept/reject, early exit, convergence. The fixed-size math inside each iteration (FK, Jacobian, residual, the damped solve, the limit projection, collision terms) should be a traced mantis algorithm, not hand-written code calling traced FK through `kernels/robot.cuh` (`traced=True`). That swap alone gained 1.2-3x on IK; tracing the whole step gained 13-74x (see `benchmarks/README.md` on the `benchmarks` branch). GRiM's IK is built this way (`kernels/ik_mantis`: CUDA solver loops over `ik_geometry`), a median 13x over the hand-written kernels it replaced (GRiM `test/benchmarks/IK_RESULTS.md`). |
 
 Measured speedups, traced vs GRiD, as JAX wall time (`test/benchmarks/bench_traced_vs_generated.py`
-in GRiM, RTX A5000). Ratios above 1 favor crocket:
+in GRiM, RTX A5000). Ratios above 1 favor mantis:
 
 | | B ≤ 128 | B = 1024 | B = 16384 |
 |---|---|---|---|
@@ -83,7 +83,7 @@ the choice matters, benchmark it and do not assume.
 ## Adding a traced algorithm or op
 
 Trace the whole computation, not just its FK. The benchmarks show the cost of doing less:
-- **IK:** GRiM's hand-written LM solver with crocket's FK swapped in (`traced=True`) gained only
+- **IK:** GRiM's hand-written LM solver with mantis's FK swapped in (`traced=True`) gained only
   1.2-3x. Tracing the whole step (`ik_lm_step`) gained 13-74x.
 - **FK + collision:** GRiM's fused collision kernel with traced FK did not beat its own
   table-driven FK. Tracing FK, sphere placement and the box test together (`sphere_collision`)
@@ -135,7 +135,7 @@ workload needs robot math, write a new algorithm for it. Do not wrap an existing
 - `harness.sample_inputs`: sample values for any new input name.
 - `harness.TOLERANCE`: a float bar justified by conditioning, not widened until the test passes.
 - `tests/test_oracle.py`: the interpreter against an independent float64 implementation
-  (Pinocchio or NumPy). Check the step's math in isolation from crocket's kinematics, which
+  (Pinocchio or NumPy). Check the step's math in isolation from mantis's kinematics, which
   `test_kinematics_vs_pinocchio` covers: a solve amplifies the ~1e-8 kinematics differences by
   its condition number.
 - `tests/test_cuda.py` `ALGORITHMS` / `CASES`: every tier against the interpreter, bit-identity
@@ -146,7 +146,8 @@ workload needs robot math, write a new algorithm for it. Do not wrap an existing
 
 ## Benchmarking against other libraries
 
-Baselines are cloned at pinned commits by `benchmarks/external/clone.sh` (gitignored). To add one:
+The suite lives in GRiM (`benchmarks/`); baselines are cloned at pinned commits by GRiM's
+`benchmarks/external/clone.sh` (gitignored). To add one:
 
 1. **Calibrate first.** Before writing any harness code, run the library's own benchmark or example
    unmodified, in its own pinned environment if it needs one. Compare the result to what the
@@ -172,7 +173,7 @@ authors' numbers as if they came from our runs.
 ## Rules
 
 - **The trace is only as good as the Python.** Tracing removes overhead. It does not find a
-  better algorithm or a better schedule. Port GRiD's formulation when crocket loses.
+  better algorithm or a better schedule. Port GRiD's formulation when mantis loses.
 - **New spatial ops follow Featherstone's representation** (RBDA §2.13; `CITATIONS.md`). Spatial
   vectors are `[angular; linear]` `Motion` / `Force`. Transforms are `SE3` as `E` + `r`, never a
   dense 6x6 Plücker matrix. Inertias are `RigidInertia` (`m, h, I_O`) or `ArticulatedInertia`
@@ -183,7 +184,7 @@ authors' numbers as if they came from our runs.
   and Pinocchio on CPU. `tests/test_cuda.py` checks every tier against the interpreter,
   bit-identity under `-fmad=false`, and the -O0/-O3 guard.
 - **gpu-proof.** `tests/test_cuda.py` is the signed receipt (`python -m pytest tests/test_cuda.py
-  --gpu-proof-enable` on a clean tree). Any change to `python/crocket`, `tests`, `resources` or
+  --gpu-proof-enable` on a clean tree). Any change to `python/mantis`, `tests`, `resources` or
   `pyproject.toml` invalidates it. After that, re-record it, bump GRiM's pointer, and re-record
   GRiM's receipt.
 - **Block `units` are threads.** `Variant("block", units=N)` takes N threads, a multiple of 32

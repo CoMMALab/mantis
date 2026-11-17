@@ -15,7 +15,7 @@ import numpy as np
 import pinocchio as pin
 import pytest
 
-import crocket
+import mantis
 from robots import ROBOTS, SMALL, URDFS, inputs, options, robot
 
 # n^2 tangents: derivatives on the small set plus one humanoid keeps the suite fast. Pinocchio's
@@ -36,10 +36,10 @@ def _pinocchio(r):
 
 
 def _rbd(r):
-    sys.path.insert(0, str(crocket.robot.GRID_DIR / "external"))
+    sys.path.insert(0, str(mantis.robot.GRID_DIR / "external"))
     from RBDReference.RBDReference import RBDReference
     from URDFParser import URDFParser
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings(), crocket.robot.exact_origins():
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings(), mantis.robot.exact_origins():
         warnings.simplefilter("ignore")
         return RBDReference(URDFParser().parse(str(URDFS[r.name])))
 
@@ -54,9 +54,9 @@ def test_dynamics_vs_pinocchio(robot_name, name):
     r = robot(robot_name)
     if not _supported(r, name):
         with pytest.raises(ValueError, match="mimic"):
-            crocket.trace(r, name)
+            mantis.trace(r, name)
         return
-    prog = crocket.trace(r, name)
+    prog = mantis.trace(r, name)
     x = inputs(r)
     out = prog.evaluate(**{k: x[k] for k, _ in prog.inputs})
     model, cols, vcols = _pinocchio(r)
@@ -89,7 +89,7 @@ def test_dynamics_vs_pinocchio(robot_name, name):
                                               if r != "fr3" or n != "aba"])
 def test_dynamics_vs_rbdreference(robot_name, name):
     r = robot(robot_name)
-    prog = crocket.trace(r, name)
+    prog = mantis.trace(r, name)
     x = inputs(r)
     out = prog.evaluate(**{k: x[k] for k, _ in prog.inputs})
     ref = _rbd(r)
@@ -106,8 +106,8 @@ def test_dynamics_vs_rbdreference(robot_name, name):
 @pytest.mark.parametrize("robot_name", ROBOTS)
 def test_kinematics_vs_pinocchio(robot_name):
     r = robot(robot_name)
-    poses = crocket.trace(r, "frame_poses", **options(r, "frame_poses"))
-    jac = crocket.trace(r, "frame_jacobian", **options(r, "frame_jacobian"))
+    poses = mantis.trace(r, "frame_poses", **options(r, "frame_poses"))
+    jac = mantis.trace(r, "frame_jacobian", **options(r, "frame_jacobian"))
     ee = options(r, "frame_jacobian")["frame"]
     x = inputs(r)
     P = poses.evaluate(q=x["q"])["poses"]
@@ -138,7 +138,7 @@ def test_sphere_collision_vs_pinocchio(robot_name):
     rng = np.random.default_rng(1)
     axes = np.linalg.qr(rng.normal(size=(3, 3, 3)))[0]
     boxes = np.concatenate([rng.uniform(-0.6, 0.6, (3, 3)), axes.reshape(3, 9), rng.uniform(0.05, 0.3, (3, 3))], 1)
-    prog = crocket.trace(r, "sphere_collision", spheres=spheres, n_boxes=3)
+    prog = mantis.trace(r, "sphere_collision", spheres=spheres, n_boxes=3)
     x = inputs(r, batch=16)
     got = prog.evaluate(q=x["q"], boxes=np.tile(boxes.reshape(-1), (16, 1)))["margin"][:, 0]
     model, cols, _ = _pinocchio(r)
@@ -180,12 +180,12 @@ def test_ik_lm_step_matches_numpy(robot_name):
     """One traced LM step against the same step in numpy: pose and Jacobian from the traced
     frame_jacobian (checked against Pinocchio by test_kinematics_vs_pinocchio), the same smooth
     log (checked against Pinocchio's log3 below), the damped solve by numpy. Isolates the step's
-    own math: crocket snaps near-round frame constants, so its rotations are orthonormal only to
+    own math: mantis snaps near-round frame constants, so its rotations are orthonormal only to
     ~1e-5, which the solve and log near pi amplify differently from Pinocchio."""
     r = robot(robot_name)
     frame = options(r, "ik_lm_step")["frame"]
-    prog = crocket.trace(r, "ik_lm_step", frame=frame)
-    jac = crocket.trace(r, "frame_jacobian", frame=frame)
+    prog = mantis.trace(r, "ik_lm_step", frame=frame)
+    jac = mantis.trace(r, "frame_jacobian", frame=frame)
     rng = np.random.default_rng(2)
     x = inputs(r, batch=8)
     quat = rng.normal(size=(8, 4))
@@ -211,13 +211,13 @@ def test_ik_lm_step_matches_numpy(robot_name):
 
 
 
-def _variant(name: str, edit) -> crocket.Robot:
+def _variant(name: str, edit) -> mantis.Robot:
     """``name``'s URDF with one textual edit, parsed afresh."""
     import tempfile
     from pathlib import Path
-    path = Path(tempfile.mkdtemp(prefix="crocket_")) / f"{name}.urdf"
+    path = Path(tempfile.mkdtemp(prefix="mantis_")) / f"{name}.urdf"
     path.write_text(edit(Path(URDFS[name]).read_text()))
-    return crocket.Robot(path, name=name)
+    return mantis.Robot(path, name=name)
 
 
 def _wxyz(R):
@@ -242,7 +242,7 @@ def test_ik_geometry_runtime_rotation_matches_reoriented_urdf(joint):
     x = inputs(r, batch=4)
     tgt = np.tile([0.0, 1, 0, 0, 0.3, 0.1, 0.5], (4, 1))   # panda points down: keep the log off pi
     def run(m, rot, **o):
-        return crocket.trace(m, "ik_geometry", **opts, **o).evaluate(
+        return mantis.trace(m, "ik_geometry", **opts, **o).evaluate(
             q=x["q"], targets=tgt, rot=np.tile(np.asarray(rot, float), (4, 1)).reshape(4, -1))
     E0 = lambda m: m.joints[joint].E[0] + m.joints[joint].E[1]    # E = R^T at q = 0
     plain, moved = run(r, []), run(r2, [])
@@ -263,16 +263,16 @@ def test_continuous_joint_traces_as_unlimited_revolute():
     assert rc.joints[0].kind == "revolute" and rc.joints[0].limits == (-np.inf, np.inf)
     x = inputs(r, batch=4)
     frames = tuple(r.frames)
-    np.testing.assert_array_equal(crocket.trace(rc, "frame_poses", frames=frames).evaluate(q=x["q"])["poses"],
-                                  crocket.trace(r, "frame_poses", frames=frames).evaluate(q=x["q"])["poses"])
+    np.testing.assert_array_equal(mantis.trace(rc, "frame_poses", frames=frames).evaluate(q=x["q"])["poses"],
+                                  mantis.trace(r, "frame_poses", frames=frames).evaluate(q=x["q"])["poses"])
 
 @pytest.mark.parametrize("robot_name", ["panda", "fr3"])
 def test_derivatives_match_finite_differences(robot_name):
     """Checks the analytical tangents against the traced RNEA itself (mimic joints included)."""
     r = robot(robot_name)
     x = inputs(r, batch=2)
-    rnea = crocket.trace(r, "rnea")
-    d = crocket.trace(r, "rnea_derivatives").evaluate(q=x["q"], qd=x["qd"], qdd=x["qdd"])
+    rnea = mantis.trace(r, "rnea")
+    d = mantis.trace(r, "rnea_derivatives").evaluate(q=x["q"], qd=x["qd"], qdd=x["qdd"])
     h, n = 1e-6, r.n_q
     for wrt, key in (("q", "dtau_dq"), ("qd", "dtau_dqd")):
         fd = np.zeros((2, n, n))
@@ -289,7 +289,7 @@ def test_derivatives_match_finite_differences(robot_name):
 def test_folding_removes_constant_work():
     """A revolute joint's transform is a few sin/cos products, not a dense 6x6."""
     r = robot("panda")
-    prog = crocket.trace(r, "rnea")
+    prog = mantis.trace(r, "rnea")
     X = [nd for nd in prog.g.nodes if nd.op == "joint_transform"]
     assert len(X) == len(r.joints)  # recorded once per joint (CSE across both passes)
     assert all(nd.cost <= 14 for nd in X)
@@ -297,7 +297,7 @@ def test_folding_removes_constant_work():
 
 def test_dead_outputs_are_eliminated():
     r = robot("panda")
-    prog = crocket.trace(r, "rnea")
+    prog = mantis.trace(r, "rnea")
     live = prog.g.live(prog.flat_outputs[-1:])  # the leaf joint's torque only
     assert live.sum() < prog.g.live(prog.flat_outputs).sum()
 
@@ -305,7 +305,7 @@ def test_dead_outputs_are_eliminated():
 def test_compact_inertia_ops_match_dense():
     """Featherstone's rbi / abi forms: X^T I X and I v against the dense 6x6 products, with every
     input symbolic so nothing folds."""
-    from crocket.trace import ArticulatedInertia, Motion, RigidInertia, SE3, Tracer
+    from mantis.trace import ArticulatedInertia, Motion, RigidInertia, SE3, Tracer
 
     t = Tracer(robot("panda"))
 
@@ -349,7 +349,7 @@ def test_compact_inertia_ops_match_dense():
 
 
 def _traj_world(r, prog, batch):
-    from crocket import harness
+    from mantis import harness
     x = harness.sample_inputs(prog, batch, seed=3)
     x["q"] = inputs(r, batch=batch, seed=3)["q"]
     return x
@@ -384,16 +384,102 @@ def _traj_reference(r, x, b, rows, pairs):
         if kind == "boxes":
             qk = np.abs(o[3:12].reshape(3, 3) @ (c - o[:3])) - o[12:]
             return np.linalg.norm(np.maximum(qk, 0)) + min(qk.max(), 0) - rr
+        if kind == "cylinders":  # independent form: radial and axial excess of a solid cylinder
+            v = c - o[:3]
+            a = v @ o[3:6]
+            qk = np.array([np.linalg.norm(v - a * o[3:6]) - o[6], abs(a) - o[7]])
+            return np.linalg.norm(np.maximum(qk, 0)) + min(qk.max(), 0) - rr
         return (c - o[3:6]) @ o[:3] - rr
 
     for row in cs:
         if not row:
             continue
-        for g, (kind, k) in enumerate((("spheres", 4), ("capsules", 7), ("boxes", 15), ("halfspaces", 6)), 1):
+        for g, (kind, k) in enumerate((("spheres", 4), ("capsules", 7), ("boxes", 15), ("halfspaces", 6),
+                                               ("cylinders", 8)), 1):
             obs = x[kind][b].reshape(-1, k)
             for o in obs:
                 out.append((g, min(dist(kind, c, rr, o) for c, rr in row)))
     return out
+
+
+@pytest.mark.parametrize("robot_name", ["panda", "fetch", "grid_go2"])
+def test_traj_spheres_vs_pinocchio(robot_name):
+    """The robot half of a runtime-world collision term: every row sphere's world centre."""
+    from robots import traj_set
+    r = robot(robot_name)
+    rows = traj_set(r)["rows"]
+    prog = mantis.trace(r, "traj_spheres", rows=rows)
+    x = _traj_world(r, prog, 6)
+    got = prog.evaluate(**x)["centres"]
+    model, cols, _ = _pinocchio(r)
+    data = model.createData()
+    for b in range(6):
+        q = np.zeros(model.nq)
+        q[cols] = x["q"][b]
+        pin.framesForwardKinematics(model, data, q)
+        want = []
+        for name, sph in rows:
+            fid = (model.getFrameId(name, pin.BODY) if name in r.root_links else
+                   model.getFrameId(name, pin.JOINT if any(j.name == name for j in r.joints) else pin.FIXED_JOINT))
+            want += [x_ for s_ in sph for x_ in data.oMf[fid].act(np.asarray(s_[:3], float))]
+        _close(got[b], np.array(want))
+
+
+@pytest.mark.parametrize("robot_name", ["panda", "fetch", "grid_go2"])
+def test_traj_backprop_matches_finite_differences(robot_name):
+    """dcost/dq of cost = sum_s g_s . c_s(q) (g fixed): the world-wrench pass against central
+    differences of the traced centres."""
+    from robots import traj_set
+    r = robot(robot_name)
+    rows = traj_set(r)["rows"]
+    bp = mantis.trace(r, "traj_backprop", rows=rows)
+    sp = mantis.trace(r, "traj_spheres", rows=rows)
+    x = _traj_world(r, bp, 6)
+    got = bp.evaluate(**x)["grad"]
+    cost = lambda q: np.sum(sp.evaluate(q=q)["centres"] * x["gsph"], axis=1)
+    h = 1e-6
+    fd = np.zeros_like(got)
+    for c in range(r.n_q):
+        hi, lo = x["q"].copy(), x["q"].copy()
+        hi[:, c] += h
+        lo[:, c] -= h
+        fd[:, c] = (cost(hi) - cost(lo)) / (2 * h)
+    np.testing.assert_allclose(got, fd, atol=1e-6, rtol=1e-5)
+
+
+def _chain(r, j):
+    """Joint ``j`` and its movable ancestors."""
+    out = set()
+    while j >= 0:
+        out.add(j)
+        j = r.joints[j].parent
+    return out
+
+
+@pytest.mark.parametrize("robot_name", ["panda", "fetch"])
+def test_traj_self_pair_gradient_skips_shared_joints(robot_name):
+    """A self pair alone: the joints on both rows' chains move the pair rigidly, so their
+    gradient is exactly 0 (not roundoff), and the rest match central differences of the cost."""
+    from robots import traj_set
+    r = robot(robot_name)
+    rows = traj_set(r)["rows"]
+    joint = {j.name: i for i, j in enumerate(r.joints)}
+    for pair in ((0, 2), (1, len(rows) - 2), (2, len(rows) - 2)):
+        prog = mantis.trace(r, "traj_collision", rows=rows, pairs=(pair,))
+        x = _traj_world(r, prog, 4)
+        x["params"][:, 0] = 10.0   # every pair inside the margin
+        got = prog.evaluate(**x)["grad"]
+        shared = _chain(r, joint.get(rows[pair[0]][0], -1)) & _chain(r, joint.get(rows[pair[1]][0], -1))
+        cols = [r.joints[k].q_index for k in shared]
+        assert cols and np.all(got[:, cols] == 0.0), (pair, got[:, cols])
+        cost = lambda q: prog.evaluate(**{**x, "q": q})["cost"][:, 0]
+        h, fd = 1e-6, np.zeros_like(got)
+        for c in range(r.n_q):
+            hi, lo = x["q"].copy(), x["q"].copy()
+            hi[:, c] += h
+            lo[:, c] -= h
+            fd[:, c] = (cost(hi) - cost(lo)) / (2 * h)
+        np.testing.assert_allclose(got, fd, atol=1e-6, rtol=1e-5)
 
 
 @pytest.mark.parametrize("robot_name", ["panda", "ur5", "fetch"])
@@ -403,7 +489,7 @@ def test_traj_collision_vs_pinocchio(robot_name, mode):
     from robots import traj_set
     r = robot(robot_name)
     opts = traj_set(r)
-    prog = crocket.trace(r, "traj_collision", mode=mode, **opts)
+    prog = mantis.trace(r, "traj_collision", mode=mode, **opts)
     x = _traj_world(r, prog, 8)
     got = prog.evaluate(**x)["cost"][:, 0]
     margin = x["params"][0, 0]
@@ -423,13 +509,13 @@ def test_traj_smooth_min_vs_pinocchio(robot_name):
     from robots import traj_set
     r = robot(robot_name)
     opts = traj_set(r)
-    prog = crocket.trace(r, "traj_smooth_min", **opts)
+    prog = mantis.trace(r, "traj_smooth_min", **opts)
     x = _traj_world(r, prog, 8)
     got = prog.evaluate(**x)["dist"]
     tau = x["params"][0, 1]
     for b in range(8):
         terms = _traj_reference(r, x, b, opts["rows"], opts["pairs"])
-        for g in range(5):
+        for g in range(6):
             ds = np.array([d for gg, d in terms if gg == g])
             want = 1e10 if ds.size == 0 else -tau * np.log(np.sum(np.exp(-ds / tau)))
             _close(got[b, g], want)
@@ -443,7 +529,7 @@ def test_traj_gradients_match_finite_differences(robot_name, name, mode):
     from robots import traj_set
     r = robot(robot_name)
     opts = traj_set(r) | ({"mode": mode} if mode else {})
-    prog = crocket.trace(r, name, **opts)
+    prog = mantis.trace(r, name, **opts)
     x = _traj_world(r, prog, 6)
     val, grad = ("cost", "grad") if name == "traj_collision" else ("dist", "jac")
     got = prog.evaluate(**x)[grad].reshape(6, -1, r.n_q)

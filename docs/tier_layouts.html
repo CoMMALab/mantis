@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- Interactive explorer of the cooperative tier layouts (k warps x P problems per warp).
      Open directly in a browser. Timings are traj_collision on Panda, RTX A5000; see OPEN_TASKS.md. -->
-<title>crocket Tier Layouts</title>
+<title>mantis Tier Layouts</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
 <style>
@@ -95,7 +95,7 @@ tr:last-child td { border-bottom: none; }
 <body>
 
 <div class="wrap">
-  <h1>crocket tier layouts</h1>
+  <h1>mantis tier layouts</h1>
   <p class="lede">A block is <b>k warps</b> (the ranks, each with its own instruction stream) holding <b>P problems per warp</b>. Each warp's 32 lanes split into P groups of 32 / P lanes; a group works on one problem's elements, and every lane runs the same shape-group statement. Pick a layout to see where each lane goes.</p>
 
   <section class="explorer" aria-label="Layout explorer">

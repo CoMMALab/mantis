@@ -1,4 +1,4 @@
-# Open tasks: crocket
+# Open tasks: mantis
 
 Things that have been found but not fixed yet. Add an entry when you find one, and delete it
 when it's fixed (the fix commit is the record). Format: **title**: symptom / evidence / where /
@@ -14,7 +14,7 @@ re-checked against current code.
 
 - **GRiM's MPPI IK is capped at 32 particles per seed**: `mppi_ik(n_particles=...)` above 32
   is rejected (`InvalidArgument` from the FFI handler); before, it was silently clamped to 32.
-  The cap is `CK_MAX_EVAL` in GRiM's `kernels/ik_crocket/ck.cuh`: a seed's particle costs live
+  The cap is `CK_MAX_EVAL` in GRiM's `kernels/ik_mantis/ck.cuh`: a seed's particle costs live
   in a fixed `real err[CK_MAX_EVAL]` / `real costs[CK_MAX_EVAL]`, in registers at the thread tier
   and in the per-seed shared `Work` slot at the warp and block tiers. Suggested fix: make the
   cap a build-time parameter (shared memory sized from it at the cooperative tiers), or stream
@@ -67,7 +67,7 @@ Layouts explained interactively in `docs/tier_layouts.html` (open in a browser).
   RNEA panda 8.3 / 12.8 / 20.8, baxter 17.7 / 20.8 / 34.6. So large traces at small batch gain
   1.7-2.5x over thread; RNEA stays thread's. Task placement beat element placement in every
   step 3 case.
-  Step 4 (done in crocket, GRiM pointer not yet bumped): one design, `warp` / `block` with P
+  Step 4 (done in mantis, GRiM pointer not yet bumped): one design, `warp` / `block` with P
   problems per warp (`Variant.problems`, 1-32). P = 1 is the step 3 emitter (GLASS's contract,
   GRiM IK's calls unchanged); P = 32 is the former `split` tier's per-lane trace (the `split`
   tier is gone: `Variant("block", 32 * k, problems=32)`); P in between packs problems per warp,
@@ -75,10 +75,10 @@ Layouts explained interactively in `docs/tier_layouts.html` (open in a browser).
   conflicts). traj_collision panda, block256, us: P=1 82.8 at B=1 and 77.8 at B=8; P=4 85.9 at
   B=64; P=32 125 at B=1024; thread 242 at B=8192: each batch range has its own winner, all
   bit-identical. Removed: the lane-switch warp / block codegen, `Variant.narrow`. Still open:
-  bump GRiM's crocket pointer and re-run its IK / dynamics suites (it calls `_warp` / `_block`
+  bump GRiM's mantis pointer and re-run its IK / dynamics suites (it calls `_warp` / `_block`
   at P = 1 with `_warp_smem` / `_block_smem`, unchanged names); `sync="named"`
   (`REDESIGN(ranks)`) is untuned and can go.
-  Step 5 (crocket 0.2.0, GRiM 0.7.0): the lookup tables left the per-problem scratch. They were
+  Step 5 (mantis 0.2.0, GRiM 0.7.0): the lookup tables left the per-problem scratch. They were
   88% of g1's (174 -> 5793 elements per seed vs the old tiers), which cut GRiM IK occupancy and
   made g1 SQP at 1024 seeds 1.65-1.72x slower than the old tiers. The warp / block functions take
   `tables` (once per block, `<alg>_<tier>_tables<T>()` elements, 16-bit indices), filled once per
@@ -87,7 +87,7 @@ Layouts explained interactively in `docs/tier_layouts.html` (open in a browser).
   thread-count test compares one step to the tiers' round-off (FMA contraction differs per warp
   count; bit-identical only under -fmad=false).
   Next: GRiM IK at P = 32 (lanes = seeds, the k warps sharing the geometry, lockstep loops while
-  any seed is active, best of all seeds). The crocket sweep says it pays for g1: ik_geometry at
+  any seed is active, best of all seeds). The mantis sweep says it pays for g1: ik_geometry at
   block k=4-8, P=32 is 1.4-2.0x the thread tier up to B = 4096 (thread spills 2000 B).
 
 - **g1 `ik_geometry` in float32 is ~5-8e-5 off the float64 interpreter** (scaled error), on every
@@ -115,6 +115,79 @@ Layouts explained interactively in `docs/tier_layouts.html` (open in a browser).
   guards against ptxas miscompiling large traces, so don't just drop it: pass scratch as a
   shared-space offset (or `__cvta_generic_to_shared` plus `ld.shared`) through the stage calls.
 
+- **Pressure fitting: what's left** (landed: `mantis.device` reads the target GPU's shared
+  memory and registers from the driver, or from the CUDA guide's table when `MANTIS_ARCH`
+  names another architecture; `schedule.build(max_slots=...)` fits P = 32 schedules with ALAP
+  levelling, a barrier per stage, width-capped Sethi-Ullman levelling, then recomputation;
+  the thread tier's chunks follow Sethi-Ullman order and share scratch slots by linear scan.
+  References in CITATIONS.md.) Still open:
+  1. **P < 32 (`uniform`) has its own allocator** (`_Emitter.uniform`'s `alloc`/`release`) and
+     no budget. Its scratch is slots x P per block, so it is the path that can fit what P = 32
+     can't (g1 `rnea_derivatives`: 5091 slots/problem at P = 32, at best 1772 with every lever,
+     against 792 that fit in 99 KB; the leanest serial order still needs 1119 live values).
+  2. **The warp tier's budget assumes 4 warps per block** (`cuda.WARP_TIER_WARPS_PER_BLOCK`,
+     the harness's 128-thread launch). Launches of 256 threads can exceed it; pass the launch
+     size to `emit` if that matters.
+  3. **Fitting can be slower than not fitting** (measured, baxter `rnea_derivatives`, float,
+     idle A5000, median of 7; before = committed `cuda.py`/`schedule.py`). Thread tier (Sethi-
+     Ullman chunks + slot reuse): stack 11616 -> 5296 B, spill 648 -> 272 B, 1.05x (B=1),
+     1.39x (B=1024), 1.22x (B=65536) faster. Block k=4/8 P=32 fitted (sync_all + width): smem
+     68928 -> 25056 elements, but 2-3x slower at every batch than the plain schedule on the
+     global-memory fallback (e.g. k=4 B=1 209 -> 563 us): global scratch stays in L1/L2, and
+     width levelling adds hundreds of barriers. Warp P=32 fitted (threshold 64 + width 1):
+     spill 2268 -> 0, 0.68x at B=1 but 1.29x at B=8192 and 1.70x at B=65536. So fitting is
+     opt-in (`Variant(fit=True)`) and `tune.candidates` times fitted copies next to the plain
+     ones. `tune` now also times plain layouts over the shared-memory limit (global fallback).
+     An L2-resident scratch mode (launch only the blocks whose scratch fits L2's persisting
+     carve-out, looping over the batch) was tried and removed: it lost everywhere past B=128
+     (baxter block k4 B=65536: 9117 -> 28792 us) by starving the SMs; the plain global
+     fallback is fine because each block's scratch is reused within its lifetime and L1/L2
+     catch it. Shared-memory fitting is opt-in (`Variant(fit=True)`, `tune(fit=True)`).
+     Low priority: re-check fitting on g1.
+     Cost model (landed: `mantis.calibrate` measures op latency/issue, barrier cost by warps,
+     latency and throughput per level, DRAM bandwidth per GPU; `mantis.cost.estimate` is
+     occupancy -> waves -> per-block compute + barriers + memory (dependent rounds x latency +
+     accesses x throughput, at the level each block's working set lands); `schedule.build(cost=)`
+     picks the cheapest fitting lever; `tune(prune=N)` optional). Choosing levers by the model
+     made the fitted block layouts 1.4-1.6x faster (k8 B=65536 20809 -> 13941 us) but still
+     slower than plain. Model accuracy on baxter: right winner at B >= 8192 (Spearman +0.68);
+     at B <= 1024 it picks fitted block layouts measured ~2x slower than the best; global/L2
+     layouts modelled ~2-3x high, shared-fitted ~0.4-0.6x low. Next: per-stage overhead in
+     narrow stages (rank imbalance, branch), ILP-limited issue at low occupancy; then validate
+     on a second trace before turning `prune` on.
+  4. **Registers:** every listed architecture allows 255 per thread, so ptxas's spill report is
+     already the device's budget and `harness.fit` is unchanged. Targeting an occupancy
+     (`Device.regs_for`, `__launch_bounds__`) instead of zero spills is untried.
+
+## Features
+
+- **AD follow-ups** (`mantis.ad`, `trace(..., order=k, wrt=..., mode=...)`, landed): order 2
+  is checked against finite differences of order 1, not yet against Pinocchio's second-order
+  RNEA derivatives (`pin.computeRNEASecondOrderDerivatives`). Op counts (panda, live scalars):
+  rnea 1155, hand-written `rnea_derivatives` 10356, AD order 1 forward 11205 / reverse 9150,
+  order 2 forward 62737 / reverse 69374. Still to measure: `tune.py` time of AD vs
+  `rnea_derivatives` on panda and g1, and trace time at order 2 on g1 (Python sweeps with
+  dict tangents; 0.7 s on panda). One `mode` covers every order; forward-over-reverse
+  (reverse for order 1, forward above) needs a per-order mode list. Reverse mode sweeps once
+  per output entry, so it suits few outputs.
+
+- **Structural sparsity: remaining gaps** (landed: `_cholesky_solve` factors in minimum-degree
+  order on the trace-time zero pattern, `_elimination_order`. Solve ops after crba: g1 2717 ->
+  1492, h1_2 8752 -> 2451, h2_plus 93682 -> 10963; chains and baxter (block-diagonal M)
+  unchanged. Symmetric derivative tensors are emitted once by `mantis.ad`.) Still open:
+  1. **Sparsity across a boundary the trace doesn't cover.** Solves whose size grows with the
+     robot go to GLASS, which is dense. Trajopt's horizon loop lives in the CUDA caller, so the
+     block-tridiagonal KKT structure across timesteps is invisible to the trace. Fixes: pass the
+     trace-time zero pattern to a sparse/blocked GLASS routine, or trace one stage's blocks and
+     have the caller run a block-tridiagonal (Riccati-style) solve over them.
+  2. **Recovering blocks after scalarization.** A repeated 6x6 block pattern per joint is just
+     many separate statements. Grouping identical-pattern blocks (joint tag plus a structural
+     hash) would let the warp/block tiers give one block per shape group (lanes run the same
+     instruction) instead of scheduling scattered scalars.
+  3. **No algorithm uses an ordered sparse solve yet.** `fd_crba`-style forward dynamics through
+     the traced `_cholesky_solve` (instead of GLASS) would now be sparse on humanoids; measure
+     it against ABA and GRiD.
+
 ## Environment
 
 - **NVRTC / driver version skew** _(verify)_: the NVRTC from conda can be newer than the driver,
@@ -122,8 +195,8 @@ Layouts explained interactively in `docs/tier_layouts.html` (open in a browser).
 
 ## Branches
 
-- **`benchmarks` has library changes `main` lacks.** `benchmarks` should be `main` plus the
-  benchmark suite, but the IK work (`ik_geometry`, `analytic_ik_*`, SQP/LS traces, `rot_joint`,
-  continuous joints, `tests/test_oracle.py`) landed only on `benchmarks`. Cherry-pick the
-  non-`benchmarks/` commits onto `main`, then rebuild `benchmarks` on top. Until then GRiM pins
-  its crocket submodule to `benchmarks` (`.gitmodules`).
+- **`benchmarks` branch has library changes `main` lacks.** The suite itself moved to GRiM
+  (`benchmarks/`), but the IK work (`ik_geometry`, `analytic_ik_*`, SQP/LS traces, `rot_joint`,
+  continuous joints, `tests/test_oracle.py`) landed only on the `benchmarks` branch. Cherry-pick
+  it onto `main` and retire the branch. Until then GRiM pins its mantis submodule to `benchmarks`
+  (`.gitmodules`).

@@ -1,0 +1,1044 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0}</style></head><body>
+<title>mantis Trace Graph</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Layout: controls, a replay timeline, then a pan/zoom canvas (columns = dependency level) beside an inspector and event log */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --fg: #1a2130; --muted: #5b6577; --line: #dce0e7; --accent: #2f6fde; --accent-fg: #fff;
+  --canvas: #fbfcfd; --edge: rgba(40, 60, 100, .16); --dead: #c9ced7;
+  --t0: #2f6fde; --t1: #7a8699; --t2: #c2410c; --t3: #0f8a6a; --t4: #9b3dc7; --t5: #b8860b; --t6: #d6336c; --merge: #d62828; --o0: #2f6fde; --o1: #b8860b; --o2: #9b3dc7; --o3: #c2410c;
+  --display: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10141b; --panel: #171d26; --fg: #e2e7ef; --muted: #97a1b2; --line: #2a323e; --accent: #6b9cf0; --accent-fg: #0d1422;
+  --canvas: #131820; --edge: rgba(170, 190, 230, .14); --dead: #3a4250;
+  --t0: #6b9cf0; --t1: #8d97a8; --t2: #f08a4b; --t3: #3fc79f; --t4: #c38af0; --t5: #e2b23f; --t6: #f06a98; --merge: #ff5c5c; --o0: #5a8ae4; --o1: #b4851f; --o2: #a970de; --o3: #de6f35; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10141b; --panel: #171d26; --fg: #e2e7ef; --muted: #97a1b2; --line: #2a323e; --accent: #6b9cf0; --accent-fg: #0d1422;
+  --canvas: #131820; --edge: rgba(170, 190, 230, .14); --dead: #3a4250;
+  --t0: #6b9cf0; --t1: #8d97a8; --t2: #f08a4b; --t3: #3fc79f; --t4: #c38af0; --t5: #e2b23f; --t6: #f06a98; --merge: #ff5c5c; --o0: #5a8ae4; --o1: #b4851f; --o2: #a970de; --o3: #de6f35; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 1280px; margin: 0 auto; padding-block: 24px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 16px; }
+h1 { font-family: var(--display); font-weight: 600; font-size: 1.8rem; margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 74ch; }
+.lede { color: var(--muted); }
+
+.bar { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field label, .lbl { font-size: .74rem; font-weight: 600; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+select { font: inherit; font-size: .92rem; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); }
+select:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check { display: flex; gap: 6px; align-items: center; font-size: .9rem; padding-bottom: 6px; }
+.btn { font: inherit; font-size: .9rem; padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--accent); }
+
+.timeline { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.tl-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.tl-row .btn { min-width: 84px; }
+.step { font: 600 .9rem var(--mono); width: 34px; height: 32px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); cursor: pointer; }
+.step:hover { border-color: var(--accent); }
+#t { flex: 1 1 260px; min-width: 0; accent-color: var(--accent); }
+.phase { font-family: var(--display); font-weight: 600; }
+.pos { font: .85rem var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.counts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: .84rem; color: var(--muted); }
+.counts span { display: inline-flex; gap: 6px; align-items: center; }
+.counts i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.counts b { font: 500 .86rem var(--mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; }
+@media (max-width: 900px) { .main { grid-template-columns: 1fr; } }
+.stage { position: relative; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; height: min(70vh, 660px); min-height: 360px; touch-action: none; }
+canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+canvas.drag { cursor: grabbing; }
+.zoom { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.zoom button { width: 34px; height: 34px; font: 600 1rem var(--mono); border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
+.zoom button:hover { border-color: var(--accent); }
+.hud { position: absolute; left: 10px; bottom: 8px; font: .74rem var(--mono); color: var(--muted); pointer-events: none; }
+/* the page's own copy of the host's reset: without it .loading's display: grid beats [hidden], and the
+   overlay stays over the graph, swallowing clicks, drags and scrolls (the offline copy has no host) */
+[hidden] { display: none !important; }
+.loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+
+.side { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 14px; min-width: 0; max-height: min(70vh, 660px); overflow: auto; }
+.log { display: flex; flex-direction: column; gap: 3px; font: .78rem/1.4 var(--mono); }
+.log div { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.log div.now { font-weight: 600; }
+.log i { width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-1px); }
+.log span { overflow-wrap: anywhere; min-width: 0; }
+.legend { display: flex; flex-direction: column; gap: 4px; font-size: .86rem; }
+.legend div { display: flex; gap: 8px; align-items: center; }
+.legend i { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+.legend span.n { margin-left: auto; font-family: var(--mono); font-size: .8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; font-size: .88rem; }
+dt { color: var(--muted); }
+dd { margin: 0; font-family: var(--mono); font-size: .84rem; overflow-wrap: anywhere; }
+pre.src { margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: .8rem/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.links { display: flex; flex-wrap: wrap; gap: 4px; }
+.links button { font: .76rem var(--mono); padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--accent); cursor: pointer; }
+.empty { color: var(--muted); font-size: .88rem; }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.notes div { border-top: 2px solid var(--line); padding-top: 8px; font-size: .9rem; display: flex; flex-direction: column; gap: 4px; }
+.notes b { font-family: var(--display); font-weight: 600; }
+
+h2 { font-family: var(--display); font-weight: 600; font-size: 1.4rem; margin: 18px 0 0; text-wrap: balance; }
+.sched-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; }
+@media (max-width: 900px) { .sched-grid { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.kpi { border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.kpi span { font-size: .72rem; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.kpi b { font: 500 1rem var(--mono); font-variant-numeric: tabular-nums; }
+.kpi.bad b { color: var(--t2); }
+.kpi.good b { color: var(--t3); }
+.gantt-box { position: relative; min-width: 0; }
+#gantt { width: 100%; height: 260px; cursor: grab; display: block; touch-action: pan-y; }
+#gantt.drag { cursor: grabbing; }
+.gz { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.gz .btn { padding: 4px 10px; font-size: .84rem; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: .76rem/1.4 var(--mono); max-width: 280px; z-index: 2; }
+.lane-group { display: flex; flex-direction: column; gap: 3px; }
+.lane-group .hdr { font: .76rem var(--mono); color: var(--muted); }
+.lanes32 { display: grid; grid-template-columns: repeat(32, 1fr); gap: 1px; }
+.lanes32 i { height: 12px; border-radius: 2px; background: var(--dead); opacity: .45; }
+.lanes32 i.on { opacity: 1; }
+#smem { width: 100%; height: 90px; display: block; }
+.fine { font-size: .8rem; color: var(--muted); }
+
+.stack { display: flex; height: 28px; gap: 2px; border-radius: 4px; overflow: hidden; }
+.stack div { min-width: 2px; }
+.stack-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .84rem; }
+.stack-legend span { display: inline-flex; gap: 6px; align-items: center; }
+.stack-legend i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex: none; }
+.stack-legend b { font: 500 .84rem var(--mono); font-variant-numeric: tabular-nums; }
+.tablebox { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+th { font-size: .72rem; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+tr.cur td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+td.sym { font-family: var(--mono); white-space: nowrap; }
+.legend-table td { vertical-align: top; }
+</style>
+
+<div class="wrap">
+  <h1>mantis trace graph</h1>
+  <p class="lede">Watch mantis record an algorithm for one robot. Each step on the timeline is one call the tracer makes. mantis optimizes as it records, so a call either adds a new scalar or node, or is absorbed on the spot: folded to a constant, dropped as a zero product, simplified to an operand it already has, or merged with an identical earlier value. The last step is dead-output elimination, the one optimization that runs afterwards. Drag to pan, scroll or pinch to zoom, click to inspect, and double-click a node to expand it into its scalars.</p>
+
+  <div class="bar">
+    <div class="field"><label for="robot">Robot</label><select id="robot"></select></div>
+    <div class="field"><label for="alg">Algorithm</label><select id="alg"></select></div>
+    <div class="field"><label for="color">Colour by</label>
+      <select id="color"><option value="type">Value type</option><option value="op">Operation</option><option value="pass">Pass</option><option value="joint">Joint</option><option value="depth">Tree depth</option><option value="subtree">Subtree</option><option value="task">Task (schedule)</option><option value="stage">Stage (schedule)</option></select></div>
+    <label class="check"><input type="checkbox" id="edges" checked> Edges</label>
+    <button type="button" id="level" class="btn ghost">Expand all to scalars</button>
+  </div>
+
+  <section class="timeline" aria-label="Replay">
+    <div class="tl-row">
+      <button type="button" id="play" class="btn">Play</button>
+      <button type="button" class="step" id="back" aria-label="Back one call">‹</button>
+      <input type="range" id="t" min="0" max="1" value="0" aria-label="Replay position">
+      <button type="button" class="step" id="fwd" aria-label="Forward one call">›</button>
+      <div class="field"><label for="speed">Full replay in</label>
+        <select id="speed"><option value="10">10 s</option><option value="30" selected>30 s</option><option value="60">1 min</option><option value="180">3 min</option></select></div>
+    </div>
+    <div class="tl-row"><span class="phase" id="phase"></span><span class="pos" id="pos"></span></div>
+    <div class="counts" id="counts"></div>
+  </section>
+
+  <div class="main">
+    <div class="stage">
+      <canvas id="cv" aria-label="Trace graph: nodes by dependency level"></canvas>
+      <div class="zoom"><button id="zin" type="button" aria-label="Zoom in">+</button><button id="zout" type="button" aria-label="Zoom out">−</button><button id="zfit" type="button" aria-label="Fit graph">⤢</button></div>
+      <div class="hud" id="hud"></div>
+      <div class="loading" id="loading">Loading graphs…</div>
+    </div>
+    <aside class="side">
+      <div><span class="lbl">Recent calls</span><div class="log" id="log"></div></div>
+      <div><span class="lbl">Selected</span><div id="info" class="empty"></div></div>
+      <div><span class="lbl" id="legendTitle">Legend</span><div class="legend" id="legend"></div></div>
+    </aside>
+  </div>
+
+  <div class="notes">
+    <div><b>Two levels</b><span>Circles are nodes: one recorded operation on a spatial value (SE3, Motion, Force, inertias) or a Scalar, sized by how many scalars it created. Squares are scalar operations, the level that becomes CUDA. A node is drawn once its expansion finishes, so in the scalar view its squares appear just before it would.</span></div>
+    <div><b>Absorbed calls</b><span>A call that adds nothing flashes where it happened, in its kind's colour: the node being expanded for a folded constant or a dropped zero product, and the existing value for a simplification or a merge. These are the savings mantis gets from recording on a known robot.</span></div>
+    <div><b>Dead-output elimination</b><span>The final step marks everything no output depends on. It is a single backward pass (<span style="font-family:var(--mono)">Graph.live</span>) that the scheduler and the code generator both run; eliminated values fade out.</span></div>
+    <div><b>Columns</b><span>A unit sits one column right of its deepest input, so a column's height shows independent work. This layering is the viewer's own; mantis's scheduler groups work by the joint, depth and subtree tags, which the colour menu shows.</span></div>
+  </div>
+
+  <h2 id="schedule">From graph to schedule</h2>
+  <p class="lede"><span style="font-family:var(--mono)">schedule.build</span> turns the optimized graph into work for one problem's warps. It coarsens nodes into <b>tasks</b> (a cheap node with one consumer is recomputed inside it), levels tasks into <b>stages</b>, gives each stage's tasks to the k warps longest first, and puts a barrier only where a value crosses warps. Code generation then splits each warp's 32 lanes into P problems and runs each warp's items of a stage as one statement per expression shape, in passes of 32 / P lanes. Colour the graph above by Task or Stage to see the first two steps; click the chart to see the lanes.</p>
+
+  <div class="bar">
+    <div class="field"><label for="stier">Tier</label><select id="stier"><option value="thread">thread</option><option value="warp">warp (k = 1)</option><option value="block" selected>block</option></select></div>
+    <div class="field"><label for="sk">k: warps per block</label><select id="sk"><option>2</option><option>4</option><option selected>8</option></select></div>
+    <div class="field"><label for="sp">P: problems per warp</label><select id="sp"><option selected>1</option><option>2</option><option>4</option><option>8</option><option>16</option><option>32</option></select></div>
+    <div class="field"><label for="spl">Placement</label><select id="spl"><option value="task" selected>task (whole tasks per warp)</option><option value="element">element (items spread)</option></select></div>
+  </div>
+  <p class="empty" id="snone" hidden>No schedule for this algorithm.</p>
+
+  <div class="kpis" id="kpis"></div>
+  <div class="sched-grid" id="sgrid">
+    <div class="panel">
+      <div class="lbl">Warps over stages · one problem</div>
+      <div class="gz">
+        <button type="button" class="step" id="gzin" aria-label="Zoom in on the schedule">+</button>
+        <button type="button" class="step" id="gzout" aria-label="Zoom out of the schedule">−</button>
+        <button type="button" class="btn ghost" id="gzreset">Reset zoom</button>
+        <span class="fine" id="gzinfo">Scroll or use + / − to zoom, drag to pan. Statements are labelled once they are wide enough.</span>
+      </div>
+      <div class="gantt-box"><canvas id="gantt" aria-label="Schedule: warps by stage"></canvas><div class="tip" id="tip" hidden></div></div>
+      <p class="fine" id="gantt-note"></p>
+      <div class="lbl">Values held in shared memory between stages · per problem</div>
+      <canvas id="smem" aria-label="Values alive per stage"></canvas>
+      <p class="fine" id="smem-note"></p>
+    </div>
+    <aside class="panel">
+      <div class="lbl">Lanes</div>
+      <div id="lanes" class="empty">Click a warp in a stage to see how its lanes run it.</div>
+    </aside>
+  </div>
+  <p class="fine">Times are modelled, not measured: an item of c statements is c units, and a shape group of m items takes ⌈m / (32 / P)⌉ passes. Barrier cost, memory latency and occupancy are left out. Scratch and table sizes come from mantis's own code generator (<span style="font-family:var(--mono)">cuda.layout</span>); the shared-memory limits are the RTX A5000's (48 KB per block by default, 99 KB opt-in). Sync mode is __syncthreads; the named and dataflow modes are not shown.</p>
+
+  <h2 id="analysis">Parallel analysis of the compiled kernel</h2>
+  <p class="lede">The metrics of Grama, Gupta, Karypis and Kumar's <i>Introduction to Parallel Computing</i>, applied to the layout chosen above: one problem, run by p lanes. The serial baseline is the thread tier, one lane running every live scalar operation. Everything follows the controls above and the same statement-count model as the chart.</p>
+  <div class="kpis" id="gkpis"></div>
+  <div class="panel">
+    <div class="lbl">Where p · T<sub>p</sub> goes · lane-time for one problem</div>
+    <div class="stack" id="gstack" role="img" aria-label="Lane time split into useful work and overheads"></div>
+    <div class="stack-legend" id="glegend"></div>
+    <p class="fine" id="gnote"></p>
+  </div>
+  <div class="panel">
+    <div class="lbl">Strong scaling · same P and placement, more warps</div>
+    <div class="tablebox"><table id="gscale"></table></div>
+  </div>
+  <div class="panel">
+    <div class="lbl">Legend · what each symbol means and what is ideal</div>
+    <div class="tablebox"><table class="legend-table">
+      <thead><tr><th>Symbol</th><th>Meaning</th><th>Ideal</th></tr></thead>
+      <tbody>
+        <tr><td class="sym">W = T<sub>s</sub></td><td>Work: live scalar operations in the optimized trace, which is the thread tier's time for one problem.</td><td>As small as the optimizer can make it</td></tr>
+        <tr><td class="sym">D</td><td>Span: the longest chain of dependent operations. No number of lanes can finish sooner.</td><td>Small</td></tr>
+        <tr><td class="sym">W / D</td><td>Available parallelism: how many lanes the graph can keep busy at once on average.</td><td>At least p</td></tr>
+        <tr><td class="sym">p</td><td>Lanes working on one problem: k warps × 32 / P lanes.</td><td>No more than W / D</td></tr>
+        <tr><td class="sym">T<sub>p</sub></td><td>Parallel time for one problem (modelled: statements × passes, stage by stage, waiting for the slowest warp).</td><td>Equal to T<sub>ideal</sub></td></tr>
+        <tr><td class="sym">T<sub>ideal</sub></td><td>Brent's bound max(W / p, D): the best any schedule on p lanes could do.</td><td>—</td></tr>
+        <tr><td class="sym">T<sub>p</sub> / T<sub>ideal</sub></td><td>Schedule gap: how far this schedule is from the bound.</td><td>1</td></tr>
+        <tr><td class="sym">S = T<sub>s</sub> / T<sub>p</sub></td><td>Speedup over the thread tier for one problem (latency).</td><td>p</td></tr>
+        <tr><td class="sym">E = S / p</td><td>Efficiency: the fraction of lane-time doing useful work.</td><td>1</td></tr>
+        <tr><td class="sym">p T<sub>p</sub> / T<sub>s</sub></td><td>Cost ratio: lane-time spent relative to the serial work. 1 means cost-optimal.</td><td>1</td></tr>
+        <tr><td class="sym">T<sub>o</sub> = p T<sub>p</sub> − T<sub>s</sub></td><td>Total overhead, split below into recomputation, idle lanes in partial passes, and warps idle at barriers.</td><td>0</td></tr>
+        <tr><td class="sym">barriers</td><td>__syncthreads between stages. Counted, but costed at zero in this model; each one really costs tens of cycles.</td><td>Few</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+  <p class="fine">Why E can be low while S is high: one problem on many lanes buys latency, not throughput. When the batch fills the GPU, the thread tier already runs at E = 1 and wins; cooperative tiers pay off when the batch leaves lanes idle. mantis's <span style="font-family:var(--mono)">parallel_analysis</span> computes the same metrics with its own cost model, which still treats ranks as lanes; this section uses the compiled layout instead, so its numbers differ.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+let META = null, D = null, G = null, sel = -1, t = 0, playing = false;
+const CACHE = new Map(), expanded = new Set();
+const view = { x: 0, y: 0, k: 1 };   // screen = world * k + (x, y)
+const CELL = 6, GAP_COL = 10;
+// event kinds, as logged by the exporter
+const KINDS = [
+  ["new scalar", "--t0"], ["rewritten (e.g. 0 − x → −x)", "--t0"], ["folded to a constant", "--t5"], ["zero product dropped", "--t2"],
+  ["simplified to an operand (x·1, x+0)", "--t4"], ["merged with an identical scalar", "--merge"], ["new node", "--t0"], ["merged with an identical node", "--merge"]];
+// node row layout: op, type, level, joint, line, created, live, pass, depth, subtree, args...
+const TAG = { joint: 3, depth: 8, subtree: 9 };
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let PAL = [], KC = [];
+function readPalette() { PAL = [0, 1, 2, 3, 4, 5, 6].map(i => css(`--t${i}`)); KC = KINDS.map(k => css(k[1])); }
+
+const isScalar = u => u >= D.n;
+const nodeOf = u => isScalar(u) ? D.home[u - D.n] : u;
+
+function prepare(d) {
+  const n = d.r.length, S = d.so.length, home = new Int32Array(S).fill(-1), owned = Array.from({ length: n }, () => []);
+  for (let s = 0; s < S; s++) if (d.ow[s] >= 0) { home[s] = d.ow[s]; owned[d.ow[s]].push(s); }
+  d.e.forEach((el, i) => { for (const s of el) if (home[s] < 0 && META.ops[d.so[s]] === "in") home[s] = i; });
+  // replay: E calls, each [kind, target, node being expanded, scalar count after]; position t = calls applied, E + 1 = after DCE
+  const ev = d.ev, E = ev.length / 4, sAt = new Int32Array(S).fill(E), nAt = new Int32Array(n).fill(E);
+  let s = 0;
+  for (let e = 0; e < E; e++) {
+    while (s < ev[4 * e + 3]) sAt[s++] = e;
+    if (ev[4 * e] === 6) nAt[ev[4 * e + 1]] = e;
+  }
+  const cum = new Int32Array((E + 1) * 8);
+  for (let e = 0; e < E; e++) { cum.copyWithin((e + 1) * 8, e * 8, e * 8 + 8); cum[(e + 1) * 8 + ev[4 * e]]++; }
+  return Object.assign(d, { n, S, E, home, owned, sAt, nAt, cum, constOp: META.ops.indexOf("const") });
+}
+
+const done = () => t > D.E;   // dead-output elimination applied
+const shownAt = u => isScalar(u) ? D.sAt[u - D.n] < t : D.nAt[u] < t;
+const deadUnit = u => isScalar(u) ? !D.lv[u - D.n] : D.r[u][5] > 0 && D.r[u][6] === 0;
+
+function colourNode(i) {
+  const r = D.r[i], mode = $("color").value;
+  if (mode === "type") return PAL[r[1] % PAL.length];
+  if (mode === "op") return G.opColour.get(r[0]);
+  if (mode === "pass") return PAL[[0, 2, 1][r[7]]];
+  if (mode === "task" || mode === "stage") return schedColour(mode, schedKey(i));
+  const v = r[TAG[mode]];
+  return v < 0 ? PAL[1] : `hsl(${(v * 47) % 360} 60% 52%)`;
+}
+const colourUnit = u => !isScalar(u) ? colourNode(u) : $("color").value === "op" ? G.opColour.get(D.so[u - D.n]) : colourNode(D.home[u - D.n]);
+
+// Layout of the final graph at the current expansion; the replay reveals it unit by unit.
+function build(keepView) {
+  const n = D.n, exp = i => expanded.has(i);
+  const unitOf = s => { const h = D.home[s]; if (h < 0 || D.so[s] === D.constOp) return -1; return exp(h) && D.ow[s] === h ? n + s : h; };
+  const units = [], level = new Map(), deps = new Map();
+  const add = (u, ds) => {
+    ds.delete(u); ds.delete(-1);
+    const list = [...ds].filter(x => level.has(x));
+    let lv = 0; for (const x of list) lv = Math.max(lv, level.get(x) + 1);
+    level.set(u, lv); deps.set(u, list); units.push(u);
+  };
+  for (let i = 0; i < n; i++) {
+    const r = D.r[i];
+    if (!exp(i)) {
+      const ds = new Set();
+      for (let a = 10; a < r.length; a++) { const A = r[a]; if (!exp(A)) ds.add(A); else for (const s of D.e[A]) ds.add(unitOf(s)); }
+      add(i, ds);
+    } else for (const s of D.owned[i]) { const ds = new Set(); for (const a of D.sa[s]) ds.add(unitOf(a)); add(n + s, ds); }
+  }
+  const byLevel = [];
+  for (const u of units) (byLevel[level.get(u)] ||= []).push(u);
+  const H = Math.max(40, Math.ceil(Math.sqrt(units.length * 1.6)));
+  const pos = new Map();
+  let x = 0, cols = 0;
+  for (const lv of byLevel) {
+    if (!lv) continue;
+    cols++;
+    lv.sort((a, b) => { const A = nodeOf(a), B = nodeOf(b); return D.r[A][3] - D.r[B][3] || A - B || a - b; });
+    lv.forEach((u, k) => pos.set(u, [x + Math.floor(k / H) * CELL, (k % H) * CELL]));
+    x += Math.ceil(lv.length / H) * CELL + GAP_COL;
+  }
+  const users = new Map(units.map(u => [u, []]));
+  for (const u of units) for (const d of deps.get(u)) users.get(d).push(u);
+  const opSet = new Set([...D.r.map(r => r[0]), ...D.so]);
+  const opColour = new Map([...opSet].sort((a, b) => a - b).map((o, j) => [o, `hsl(${(j * 137.5) % 360} 58% 52%)`]));
+  let maxCost = 1; for (const r of D.r) maxCost = Math.max(maxCost, r[5]);
+  G = { units, pos, deps, users, width: x, height: H * CELL, levels: cols, opColour, maxCost, unitOf };
+  if (sel >= 0 && !pos.has(sel)) sel = -1;
+  HL = null; cellSel = null;   // unit ids change with the expansion
+  $("level").textContent = expanded.size ? "Back to spatial level" : "Expand all to scalars";
+  renderInfo(); renderLegend();
+  if (keepView) draw(); else fit();
+}
+
+function fit() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  view.k = Math.min((w - 40) / Math.max(G.width, 1), (h - 40) / Math.max(G.height, 1));
+  view.x = (w - G.width * view.k) / 2; view.y = (h - G.height * view.k) / 2;
+  draw();
+}
+
+let raf = 0;
+function draw() { if (!raf) raf = requestAnimationFrame(paint); }
+function paint() {
+  raf = 0;
+  const dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!G) return;
+  const k = view.k, base = Math.max(1, CELL * k * 0.38), fin = done();
+  const sx = u => G.pos.get(u)[0] * k + view.x, sy = u => G.pos.get(u)[1] * k + view.y;
+  const vis = [];
+  for (const u of G.units) {
+    if (!shownAt(u)) continue;
+    const X = sx(u), Y = sy(u);
+    if (X > -20 && X < w + 20 && Y > -20 && Y < h + 20) vis.push(u);
+  }
+  if ($("edges").checked && vis.length < 6000) {
+    ctx.strokeStyle = css("--edge"); ctx.lineWidth = 1; ctx.beginPath();
+    for (const u of vis) for (const d of G.deps.get(u)) if (shownAt(d) && !(fin && deadUnit(d))) { ctx.moveTo(sx(d), sy(d)); ctx.lineTo(sx(u), sy(u)); }
+    ctx.stroke();
+  }
+  const deadCol = css("--dead");
+  for (const u of vis) {
+    const dead = fin && deadUnit(u);
+    ctx.globalAlpha = dead ? 0.35 : 1;
+    ctx.fillStyle = dead ? deadCol : colourUnit(u);
+    const X = sx(u), Y = sy(u);
+    if (isScalar(u)) { const q = base * 0.85; ctx.fillRect(X - q, Y - q, 2 * q, 2 * q); }
+    else {
+      const c = D.r[u][5], rr = Math.max(1.2, CELL * k * (0.2 + 0.28 * Math.sqrt(c / G.maxCost)));
+      ctx.beginPath(); ctx.arc(X, Y, rr, 0, 6.2832); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+  // the call just replayed
+  const hit = currentHit();
+  if (hit) {
+    const [u, colour] = hit, R = Math.max(base + 5, 9);
+    ctx.strokeStyle = colour; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(sx(u), sy(u), R, 0, 6.2832); ctx.stroke();
+    ctx.globalAlpha = 0.18; ctx.fillStyle = colour; ctx.beginPath(); ctx.arc(sx(u), sy(u), R * 2.2, 0, 6.2832); ctx.fill(); ctx.globalAlpha = 1;
+  }
+  if (HL) {   // the scalars of the warp × stage picked in the schedule
+    ctx.strokeStyle = css("--merge"); ctx.lineWidth = 1.5;
+    for (const u of HL) if (G.pos.has(u) && shownAt(u)) { ctx.beginPath(); ctx.arc(sx(u), sy(u), base + 3, 0, 6.2832); ctx.stroke(); }
+  }
+  if (sel >= 0 && shownAt(sel)) {
+    ctx.lineWidth = 1.6;
+    const line = (a, b, c) => { ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(sx(a), sy(a)); ctx.lineTo(sx(b), sy(b)); ctx.stroke(); };
+    const fg = css("--fg"), acc = css("--accent");
+    for (const d of G.deps.get(sel)) if (shownAt(d)) line(d, sel, fg);
+    for (const u of G.users.get(sel)) if (shownAt(u)) line(sel, u, acc);
+    ctx.strokeStyle = fg; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx(sel), sy(sel), base + 4, 0, 6.2832); ctx.stroke();
+  }
+  $("hud").textContent = `zoom ${(k * 100).toFixed(0)}% · ${vis.length.toLocaleString()} in view` + ($("edges").checked && vis.length >= 6000 ? " · zoom in to see edges" : "");
+}
+
+// where the most recent call lands on the canvas, and in which colour
+function currentHit() {
+  if (t < 1 || done()) return null;
+  const e = t - 1, ev = D.ev, kind = ev[4 * e], tgt = ev[4 * e + 1], cur = ev[4 * e + 2];
+  let u = -1;
+  if (kind === 6 || kind === 7) u = tgt;
+  else if (kind === 2 || kind === 3) u = cur >= 0 ? (expanded.has(cur) ? -1 : cur) : -1;
+  else u = G.unitOf(tgt);
+  if (u < 0 && cur >= 0 && !expanded.has(cur)) u = cur;
+  return u >= 0 && G.pos.has(u) && shownAt(u) ? [u, KC[kind]] : null;
+}
+
+// ---- timeline ----
+function setT(v, fromSlider) {
+  t = Math.max(0, Math.min(D.E + 1, v | 0));
+  if (!fromSlider) $("t").value = t;
+  renderTimeline(); renderInfo(); draw();
+}
+function renderTimeline() {
+  const E = D.E, c = D.cum, at = Math.min(t, E) * 8;
+  $("phase").textContent = done() ? "Dead-output elimination" : t === 0 ? "Ready to record" : t === E ? "Recording finished" : "Recording";
+  $("pos").textContent = `call ${Math.min(t, E).toLocaleString()} of ${E.toLocaleString()}` + (done() ? ` · ${(D.S - D.l).toLocaleString()} scalars eliminated` : "");
+  const cnt = [[[0, 1], "new scalars", 0], [[6], "new nodes", 6], [[2], "folded", 2], [[3], "zero products dropped", 3], [[4], "simplified", 4], [[5, 7], "merged", 5]];
+  $("counts").replaceChildren(...cnt.map(([ks, label, kc]) => {
+    const s = document.createElement("span"), i = document.createElement("i"); i.style.background = KC[kc];
+    s.append(i, Object.assign(document.createElement("b"), { textContent: ks.reduce((a, k) => a + c[at + k], 0).toLocaleString() }), label);
+    return s;
+  }));
+  const log = $("log"); log.replaceChildren();
+  if (t === 0) log.append(Object.assign(document.createElement("div"), { className: "empty", textContent: "Press Play or drag the slider." }));
+  for (let e = Math.min(t, E) - 1, k = 0; e >= 0 && k < 9; e--, k++) {
+    const row = document.createElement("div"), i = document.createElement("i"); i.style.background = KC[D.ev[4 * e]];
+    if (k === 0 && !done()) row.className = "now";
+    row.append(i, Object.assign(document.createElement("span"), { textContent: describe(e) })); log.append(row);
+  }
+}
+function describe(e) {
+  const ev = D.ev, kind = ev[4 * e], tgt = ev[4 * e + 1], cur = ev[4 * e + 2], m = META;
+  const sop = s => m.ops[D.so[s]], nop = i => m.ops[D.r[i][0]];
+  // build only the description of this kind: tgt is a scalar id for kinds 0-5 and a node id for 6-7
+  const txt = [() => `s${tgt} = ${sop(tgt)}`, () => `rewritten as s${tgt} = ${sop(tgt)}`, () => "folded to a constant", () => "× 0 → dropped",
+    () => `simplified to s${tgt} (${sop(tgt)})`, () => `same as s${tgt} (${sop(tgt)}) → merged`,
+    () => `node #${tgt} ${nop(tgt)} (${m.types[D.r[tgt][1]]})`, () => `same as node #${tgt} ${nop(tgt)} → merged`][kind]();
+  return kind >= 6 ? txt : `${txt}${cur >= 0 ? ` · in #${cur} ${nop(cur)}` : ""}`;
+}
+let last = 0, acc = 0;
+function tick(now) {
+  if (!playing) return;
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  acc += dt * (D.E + 1) / +$("speed").value;
+  const step = Math.floor(acc); acc -= step;
+  if (step) setT(t + step);
+  if (t > D.E) { stop(); return; }
+  requestAnimationFrame(tick);
+}
+function stop() { playing = false; $("play").textContent = D && t > D.E ? "Replay" : "Play"; }
+$("play").onclick = () => {
+  if (playing) return stop();
+  if (t > D.E) setT(0);
+  playing = true; $("play").textContent = "Pause"; last = performance.now(); acc = 0; requestAnimationFrame(tick);
+};
+$("t").addEventListener("input", () => { stop(); setT(+$("t").value, true); });
+$("back").onclick = () => { stop(); setT(t - 1); };
+$("fwd").onclick = () => { stop(); setT(t + 1); };
+
+// ---- pan / zoom / pick ----
+function zoomAt(f, px, py) {
+  const k2 = Math.min(40, Math.max(0.005, view.k * f));
+  view.x = px - (px - view.x) * (k2 / view.k); view.y = py - (py - view.y) * (k2 / view.k); view.k = k2; draw();
+}
+// wheel distance in pixels: Firefox reports lines (deltaMode 1) and some devices pages (2), where ~3 per notch would barely zoom
+const wheelPx = e => e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1);
+cv.addEventListener("wheel", e => { e.preventDefault(); const b = cv.getBoundingClientRect(); zoomAt(Math.exp(-wheelPx(e) * 0.0015), e.clientX - b.left, e.clientY - b.top); }, { passive: false });
+const ptrs = new Map(); let moved = false, pinch = 0;
+cv.addEventListener("pointerdown", e => { cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); moved = false; cv.classList.add("drag"); });
+cv.addEventListener("pointermove", e => {
+  if (!ptrs.has(e.pointerId)) return;
+  const [px, py] = ptrs.get(e.pointerId);
+  if (ptrs.size === 2) {
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]), r = cv.getBoundingClientRect();
+    if (pinch) zoomAt(d / pinch, (a[0] + b[0]) / 2 - r.left, (a[1] + b[1]) / 2 - r.top);
+    pinch = d; moved = true; return;
+  }
+  const dx = e.clientX - px, dy = e.clientY - py;
+  if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+  view.x += dx; view.y += dy; ptrs.set(e.pointerId, [e.clientX, e.clientY]); draw();
+});
+function up(e) {
+  const wasTap = ptrs.size === 1 && !moved;
+  ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch = 0; if (!ptrs.size) cv.classList.remove("drag");
+  if (wasTap && e.type === "pointerup") select(pick(e));
+}
+cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+cv.addEventListener("dblclick", e => { const u = pick(e); if (u >= 0 && !isScalar(u)) toggle(u); });
+function pick(e) {
+  const b = cv.getBoundingClientRect(), wx = (e.clientX - b.left - view.x) / view.k, wy = (e.clientY - b.top - view.y) / view.k;
+  const lim = Math.max(CELL * 0.8, 8 / view.k);
+  let best = -1, bd = lim * lim;
+  for (const u of G.units) {
+    if (!shownAt(u)) continue;
+    const [x, y] = G.pos.get(u), d = (x - wx) ** 2 + (y - wy) ** 2;
+    if (d < bd) { bd = d; best = u; }
+  }
+  return best;
+}
+function centreOn(u) { const [x, y] = G.pos.get(u); view.x = cv.clientWidth / 2 - x * view.k; view.y = cv.clientHeight / 2 - y * view.k; }
+function select(u, centre) { sel = u; renderInfo(); if (centre && u >= 0) centreOn(u); draw(); drawGantt(); }
+function toggle(i) {
+  if (expanded.has(i)) { expanded.delete(i); build(true); select(i, true); return; }
+  if (!D.owned[i].length) return;
+  expanded.add(i); build(true);
+  const first = D.owned[i].map(s => D.n + s).find(u => G.pos.has(u));
+  select(first ?? -1, first !== undefined);
+}
+
+// ---- inspector, legend ----
+function unitLabel(u) { return isScalar(u) ? `s${u - D.n} ${META.ops[D.so[u - D.n]]}` : `#${u} ${META.ops[D.r[u][0]]}`; }
+function linkGroup(box, title, ids) {
+  ids = ids.filter(shownAt);
+  if (!ids.length) return;
+  box.append(Object.assign(document.createElement("div"), { className: "lbl", textContent: `${title} (${ids.length})`, style: "margin-top:10px" }));
+  const l = document.createElement("div"); l.className = "links";
+  for (const j of ids.slice(0, 40)) { const b = Object.assign(document.createElement("button"), { type: "button", textContent: unitLabel(j) }); b.onclick = () => select(j, true); l.append(b); }
+  if (ids.length > 40) l.append(Object.assign(document.createElement("span"), { className: "empty", textContent: ` +${ids.length - 40} more` }));
+  box.append(l);
+}
+function dlist(pairs) {
+  const dl = document.createElement("dl");
+  for (const [k, v] of pairs) dl.append(Object.assign(document.createElement("dt"), { textContent: k }), Object.assign(document.createElement("dd"), { textContent: v }));
+  return dl;
+}
+function srcBlock(box, i) {
+  const r = D.r[i];
+  if (r[4] < 0) return;
+  box.append(Object.assign(document.createElement("div"), { className: "lbl", textContent: "Recorded at " + META.lines[r[4]], style: "margin-top:10px" }),
+             Object.assign(document.createElement("pre"), { className: "src", textContent: META.src[r[4]] || "(source not available)" }));
+}
+function renderInfo() {
+  const box = $("info");
+  if (sel < 0 || !G || !shownAt(sel)) { box.className = "empty"; box.textContent = "Click a node or scalar to inspect it. Double-click a node to expand it."; return; }
+  box.className = ""; box.replaceChildren();
+  const m = META, fin = done();
+  if (isScalar(sel)) {
+    const s = sel - D.n, i = D.home[s], r = D.r[i];
+    const args = D.sa[s].map(a => D.so[a] === D.constOp ? "const" : `s${a}`).join(", ");
+    box.append(dlist([["scalar", `s${s}`], ["operation", m.ops[D.so[s]]], ["arguments", args || "–"], ["recorded at call", (D.sAt[s] + 1).toLocaleString()],
+      ["status", fin ? (D.lv[s] ? "live" : "eliminated: no output uses it") : "kept (liveness is decided at the end)"],
+      ["owning node", `#${i} ${m.ops[r[0]]} (${m.types[r[1]]})`]]));
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "btn ghost", textContent: `Collapse into node #${i}`, style: "margin-top:10px" });
+    b.onclick = () => toggle(i); box.append(b);
+    srcBlock(box, i);
+  } else {
+    const r = D.r[sel], own = D.owned[sel].length;
+    const status = r[5] === 0 ? (r[0] <= 1 ? "input or constant" : "added no scalars: all folded, simplified or merged")
+      : !fin ? "kept (liveness is decided at the end)" : r[6] === 0 ? "eliminated: no output uses it" : r[6] < r[5] ? "partly eliminated" : "live";
+    box.append(dlist([["node", `#${sel}`], ["operation", m.ops[r[0]]], ["value type", m.types[r[1]]], ["value size", `${D.e[sel].length} scalars`],
+      ["joint", r[3] < 0 ? "–" : m.joints[r[3]]], ["tree depth", r[8] < 0 ? "–" : r[8]], ["subtree", r[9] < 0 ? "–" : r[9]], ["pass", ["forward", "backward", "–"][r[7]]],
+      ["scalars created", fin ? `${r[5]} (${r[6]} live)` : `${r[5]}`], ["recorded at call", (D.nAt[sel] + 1).toLocaleString()], ["status", status]]));
+    if (own) {
+      const b = Object.assign(document.createElement("button"), { type: "button", className: "btn", textContent: `Expand into ${own} scalar${own > 1 ? "s" : ""}`, style: "margin-top:10px" });
+      b.onclick = () => toggle(sel); box.append(b);
+    }
+    srcBlock(box, sel);
+  }
+  linkGroup(box, "Inputs", G.deps.get(sel)); linkGroup(box, "Used by", G.users.get(sel));
+}
+function renderLegend() {
+  const mode = $("color").value, m = META, counts = new Map();
+  const sched = mode === "task" || mode === "stage";
+  const keyOf = u => {
+    if (mode === "op") return isScalar(u) ? D.so[u - D.n] : D.r[u][0];
+    if (sched) return schedKey(nodeOf(u));
+    const r = D.r[nodeOf(u)]; return mode === "type" ? r[1] : mode === "pass" ? r[7] : r[TAG[mode]];
+  };
+  for (const u of G.units) { const k = keyOf(u); counts.set(k, (counts.get(k) || 0) + 1); }
+  const untagged = { joint: "no joint", depth: "untagged", subtree: "untagged", task: "no task (input, constant or dead)", stage: "no stage (input, constant or dead)" };
+  const name = k => mode === "type" ? m.types[k] : mode === "op" ? m.ops[k] : mode === "pass" ? ["forward", "backward", "untagged"][k]
+    : !SD && sched ? "no schedule exported" : k < 0 ? untagged[mode] : mode === "joint" ? m.joints[k] : mode === "task" ? `task #${k}` : `${mode} ${k}`;
+  const col = k => mode === "type" ? PAL[k % PAL.length] : mode === "op" ? G.opColour.get(k) : mode === "pass" ? PAL[[0, 2, 1][k]] : sched ? schedColour(mode, k) : k < 0 ? PAL[1] : `hsl(${(k * 47) % 360} 60% 52%)`;
+  $("legendTitle").textContent = { type: "Value type (scalars take their node's)", op: "Operation", pass: "Pass", joint: "Joint", depth: "Tree depth", subtree: "Subtree", task: "Task", stage: "Stage" }[mode] + " · final graph";
+  const L = $("legend"); L.replaceChildren();
+  const sorted = [...counts].sort((a, b) => mode === "stage" ? a[0] - b[0] : b[1] - a[1]);
+  if (sorted.length > 24) L.append(Object.assign(document.createElement("div"), { className: "empty", textContent: `${sorted.length.toLocaleString()} values; the 24 largest:` }));
+  for (const [k, c] of sorted.slice(0, 24)) {
+    const d = document.createElement("div"), i = document.createElement("i"); i.style.background = col(k);
+    d.append(i, Object.assign(document.createElement("span"), { textContent: name(k) }), Object.assign(document.createElement("span"), { className: "n", textContent: c.toLocaleString() }));
+    L.append(d);
+  }
+}
+
+// ---- schedule ----
+// SD.items rows: scalar, task, cost (statements), stage, shape id, leaf item indices
+let SIDX = [], SD = null, M = null, cellSel = null, HL = null;
+const SMEM = { def: 48 * 1024, max: 99 * 1024 };   // RTX A5000 (sm_86) shared memory per block: default, opt-in maximum
+const gc = $("gantt"), gx = gc.getContext("2d"), mc = $("smem"), mx = mc.getContext("2d");
+
+function schedKey(i) {
+  if (!SD) return -1;
+  const t = SD.node_task[i];
+  if (t < 0) return -1;
+  return $("color").value === "stage" ? (SD.task_stage[t] ?? -1) : t;
+}
+function schedColour(mode, k) {
+  if (!SD || k < 0) return PAL[1];
+  return mode === "stage" ? `hsl(${Math.round(220 - 200 * (k - 1) / Math.max(1, SD.stages - 1))} 65% 50%)` : `hsl(${(k * 61) % 360} 58% 52%)`;
+}
+const shapeColour = s => `hsl(${(s * 137.5) % 360} 55% 55%)`;
+
+function loadSched(Z, a) {
+  SD = null; M = null; cellSel = null; HL = null;
+  const ms = META.sched[a];
+  if (ms && !ms.error) {
+    const key = "s:" + META.robot + "/" + a;
+    if (!CACHE.has(key)) CACHE.set(key, schedFrom(Z, a, ms));
+    SD = CACHE.get(key);
+    if (!SD.alive) SD.alive = alive(SD);
+  }
+  $("snone").textContent = ms?.error ? `No schedule for this algorithm: ${ms.error}` : "No schedule for this algorithm.";
+  renderSched();
+}
+
+// values written in one stage and read in a later one, per stage (items with no reader are outputs, held to the end)
+function alive(sd) {
+  const last = sd.items.map(it => it[3]);
+  let out = new Array(sd.items.length).fill(true);
+  sd.items.forEach(it => { for (const l of it[5]) { last[l] = Math.max(last[l], it[3]); out[l] = false; } });
+  const a = new Array(sd.stages + 2).fill(0);
+  sd.items.forEach((it, i) => { const end = out[i] ? sd.stages : last[i]; for (let s = it[3]; s <= end; s++) a[s]++; });
+  return a;
+}
+
+function model(o = {}) {
+  const tier = o.tier ?? $("stier").value, items = SD.items, S = SD.stages;
+  const sumCost = items.reduce((a, it) => a + it[2], 0);
+  if (tier === "thread") return { thread: true, S, sumCost };
+  const k = tier === "warp" ? 1 : o.k ?? +$("sk").value, P = o.P ?? +$("sp").value, W = 32 / P, pl = o.pl ?? $("spl").value;
+  const sc = SD.sched[`${k},${pl}`];
+  const cells = [];
+  for (let st = 0; st <= S; st++) cells.push(Array.from({ length: k }, () => ({ groups: new Map(), time: 0 })));
+  items.forEach((it, i) => {
+    if (it[1] < 0) return;   // a constant or input output: a copy, no work
+    const g = cells[it[3]][sc.rank[i]].groups;
+    if (!g.has(it[4])) g.set(it[4], { shape: it[4], items: [], cost: 0 });
+    const grp = g.get(it[4]); grp.items.push(i); grp.cost = Math.max(grp.cost, it[2]);
+  });
+  // lane-time p·T_p = item statements + lanes idle inside passes + warps idle waiting for the stage's slowest warp
+  let total = 0, work = 0, nGroups = 0, passIdle = 0, warpIdle = 0;
+  const stageX = [], stageW = [];
+  for (let st = 1; st <= S; st++) {
+    let wmax = 0;
+    for (const cell of cells[st]) {
+      let tt = 0;
+      cell.list = [...cell.groups.values()];
+      for (const g of cell.list) {
+        g.passes = Math.ceil(g.items.length / W); g.start = tt; g.time = g.passes * g.cost; tt += g.time;
+        const w = g.items.reduce((a, i) => a + items[i][2], 0);
+        work += w; passIdle += g.time * W - w; nGroups++;
+      }
+      cell.time = tt; wmax = Math.max(wmax, tt);
+    }
+    for (const cell of cells[st]) warpIdle += (wmax - cell.time) * W;
+    stageX[st] = total; stageW[st] = wmax; total += wmax;
+  }
+  const [scratch, tables] = sc.layout[P];
+  return { k, P, W, pl, sc, cells, stageX, stageW, total, work, nGroups, S, sumCost, scratch, tables, passIdle, warpIdle,
+           syncs: k > 1 ? sc.sync.length : 0, use: total ? work / (total * k * W) : 0 };
+}
+
+function kpi(label, value, cls) {
+  const d = document.createElement("div"); d.className = "kpi" + (cls ? " " + cls : "");
+  d.append(Object.assign(document.createElement("span"), { textContent: label }), Object.assign(document.createElement("b"), { textContent: value }));
+  return d;
+}
+const kb = b => b >= 1024 ? `${(b / 1024).toFixed(1)} KB` : `${b} B`;
+
+function renderSched() {
+  const has = !!SD;
+  $("snone").hidden = has; $("sgrid").hidden = !has; $("kpis").hidden = !has;
+  const tier = $("stier").value;
+  $("sk").disabled = tier !== "block"; $("sp").disabled = tier === "thread"; $("spl").disabled = tier === "thread";
+  if (!has) { if (G) { renderLegend(); draw(); } return; }
+  M = model(); cellSel = null; HL = null;
+  gz.k = 1; gz.off = 0; clampZoom();   // a new layout starts zoomed out
+  const K = $("kpis"); K.replaceChildren();
+  if (M.thread) {
+    K.append(kpi("lanes per problem", "1"), kpi("problems per warp", "32"), kpi("time per problem", `${SD.W.toLocaleString()} ops`),
+             kpi("barriers", "0"), kpi("shared memory", "none"));
+  } else {
+    const bytes = 4 * (M.scratch + M.tables), fit = bytes <= SMEM.def ? "good" : bytes <= SMEM.max ? "" : "bad";
+    K.append(kpi("lanes per problem", `${M.W} × ${M.k} warp${M.k > 1 ? "s" : ""}`), kpi("problems per " + (M.k > 1 ? "block" : "warp"), M.P),
+      kpi("stages", M.S), kpi("block barriers", M.syncs), kpi("time per problem", `${M.total.toLocaleString()} units`),
+      kpi("latency vs thread (model)", `${(SD.W / M.total).toFixed(1)}×`, SD.W / M.total >= 1 ? "good" : "bad"),
+      kpi("lane use", `${Math.round(M.use * 100)}%`),
+      M.scratch < 0 ? kpi("shared memory (float)", "codegen refuses this layout", "bad")
+        : kpi("shared memory (float)", `${kb(bytes)}` + (fit === "bad" ? " · too big" : fit === "" ? " · opt-in" : ""), fit));
+  }
+  $("gantt-note").textContent = M.thread
+    ? `Thread tier: one lane runs the whole optimized trace (${SD.W.toLocaleString()} scalar ops) with values in registers and no barriers. A warp runs 32 problems side by side.`
+    : `Each column is a stage, as wide as its busiest warp. Boxes are statements: one per expression shape, lasting passes × statements. Grey is idle time waiting for the barrier.${M.k > 1 ? " Solid lines are __syncthreads; stages without one let warps carry on." : " One warp: __syncwarp between stages."} The schedule coarsened ${SD.items.length.toLocaleString()} items into ${Object.keys(SD.task_stage).length.toLocaleString()} tasks; their items sum to ${M.sumCost.toLocaleString()} statements against ${SD.W.toLocaleString()} for the thread tier, the difference being recomputation inside tasks.`;
+  $("smem-note").textContent = M.thread ? "" : M.scratch < 0 ? "mantis's code generator refuses this layout (its 16-bit index tables overflow), so it has no scratch size." :
+    `Bars: values a later stage reads, at most ${Math.max(...SD.alive).toLocaleString()} at once per problem. Code generation allocates ${M.scratch.toLocaleString()} scratch elements for all ${M.P} problem${M.P > 1 ? "s" : ""}${M.P === 32 ? " (P = 32 uses the per-lane trace's slots)" : ""} plus ${M.tables.toLocaleString()} table elements shared by the block.`;
+  $("lanes").className = "empty"; $("lanes").textContent = M.thread ? "Thread tier: each lane is one problem; nothing is shared between lanes." : "Click a warp in a stage to see how its lanes run it.";
+  drawGantt(); drawSmem(); renderGrama();
+  if (G) { renderLegend(); draw(); }
+}
+
+// ---- Grama et al. metrics of the compiled layout ----
+function grama(m) {
+  const Ts = SD.W, D = SD.D;
+  if (m.thread) return { p: 1, Tp: Ts, Ts, D, S: 1, E: 1, ratio: 1, Tideal: Ts, gap: 1, recompute: 0, passIdle: 0, warpIdle: 0, To: 0, syncs: 0 };
+  const p = m.k * m.W, Tp = m.total, S = Ts / Tp, Tideal = Math.max(Ts / p, D);
+  return { p, Tp, Ts, D, S, E: S / p, ratio: p * Tp / Ts, Tideal, gap: Tp / Tideal, recompute: m.work - Ts,
+           passIdle: m.passIdle, warpIdle: m.warpIdle, To: p * Tp - Ts, syncs: m.syncs };
+}
+const f1 = x => x >= 100 ? Math.round(x).toLocaleString() : x.toFixed(x >= 10 ? 1 : 2);
+function renderGrama() {
+  if (!SD || !M) return;
+  const g = grama(M), K = $("gkpis"); K.replaceChildren();
+  const tone = (v, good, bad) => v >= good ? "good" : v <= bad ? "bad" : "";
+  K.append(kpi("W = Tₛ", g.Ts.toLocaleString()), kpi("D", g.D), kpi("W / D", f1(g.Ts / g.D)), kpi("p", g.p),
+    kpi("Tₚ", Math.round(g.Tp).toLocaleString()), kpi("T_ideal", f1(g.Tideal)), kpi("Tₚ / T_ideal", f1(g.gap), g.gap <= 1.5 ? "good" : g.gap >= 4 ? "bad" : ""),
+    kpi("S", f1(g.S)), kpi("E", f1(g.E), tone(g.E, 0.7, 0.2)), kpi("p Tₚ / Tₛ", f1(g.ratio), g.ratio <= 1.5 ? "good" : g.ratio >= 5 ? "bad" : ""));
+  const parts = [["useful work (Tₛ)", g.Ts, "--o0"], ["recomputation", g.recompute, "--o1"], ["idle lanes in partial passes", g.passIdle, "--o2"], ["warps idle at barriers", g.warpIdle, "--o3"]];
+  const sum = parts.reduce((a, p) => a + Math.max(0, p[1]), 0) || 1;
+  $("gstack").replaceChildren(...parts.filter(p => p[1] > 0).map(([label, v, c]) => {
+    const d = document.createElement("div"); d.style.flex = `${v} 0 0`; d.style.background = `var(${c})`;
+    d.title = `${label}: ${Math.round(v).toLocaleString()} lane-units (${(100 * v / sum).toFixed(1)}%)`; return d;
+  }));
+  $("glegend").replaceChildren(...parts.map(([label, v, c]) => {
+    const s = document.createElement("span"), i = document.createElement("i"); i.style.background = `var(${c})`;
+    s.append(i, label, Object.assign(document.createElement("b"), { textContent: `${(100 * Math.max(0, v) / sum).toFixed(1)}%` })); return s;
+  }));
+  $("gnote").textContent = M.thread
+    ? "Thread tier: one lane, no overhead by construction. It is the baseline the other layouts are measured against."
+    : `p · Tₚ = ${Math.round(g.p * g.Tp).toLocaleString()} lane-units for ${g.Ts.toLocaleString()} units of work: overhead Tₒ = ${Math.round(g.To).toLocaleString()}. ` +
+      (g.Ts / g.D < g.p ? `W / D = ${f1(g.Ts / g.D)} is below p = ${g.p}: this graph cannot keep that many lanes busy, whatever the schedule. ` : "") +
+      `${g.syncs} barriers are not costed.`;
+  // strong scaling at the current P and placement
+  const rows = [["thread", model({ tier: "thread" })]];
+  if ($("stier").value !== "thread") for (const k of [1, 2, 4, 8]) rows.push([k === 1 ? "warp, k = 1" : `block, k = ${k}`, model({ tier: k === 1 ? "warp" : "block", k })]);
+  const T = $("gscale"); T.replaceChildren();
+  const head = document.createElement("tr");
+  for (const h of ["layout", "p", "Tₚ", "T_ideal", "Tₚ / T_ideal", "S", "E", "p Tₚ / Tₛ", "barriers"]) head.append(Object.assign(document.createElement("th"), { textContent: h }));
+  T.append(head);
+  for (const [label, m] of rows) {
+    const r = grama(m), tr = document.createElement("tr");
+    if ((m.thread && M.thread) || (!m.thread && !M.thread && m.k === M.k)) tr.className = "cur";
+    tr.append(Object.assign(document.createElement("td"), { textContent: label }));
+    for (const v of [r.p, Math.round(r.Tp).toLocaleString(), f1(r.Tideal), f1(r.gap), f1(r.S), f1(r.E), f1(r.ratio), r.syncs])
+      tr.append(Object.assign(document.createElement("td"), { className: "num", textContent: v }));
+    T.append(tr);
+  }
+}
+
+const ROW = 26, TOP = 18, LEFT = 58;
+const gz = { k: 1, off: 0 };   // horizontal zoom factor, and the time unit at the left edge
+function ganttGeom() {
+  const w = gc.clientWidth, rows = M.thread ? 1 : M.k;
+  const h = TOP + rows * ROW + 8, span = Math.max(1, M.thread ? SD.W : M.total);
+  const sx = (w - LEFT - 8) / span * gz.k;
+  return { w, h, rows, sx, span, X: t => LEFT + (t - gz.off) * sx };
+}
+function clampZoom() {
+  if (!M) return;
+  const { w, span } = ganttGeom();
+  gz.k = Math.min(Math.max(gz.k, 1), Math.max(1, span / 2));   // at most ~2 time units across the chart
+  const visible = span / gz.k;
+  gz.off = Math.min(Math.max(0, gz.off), span - visible);
+  $("gzreset").disabled = gz.k === 1;
+}
+function zoomGantt(f, px) {   // px: chart x of the fixed point
+  const { sx } = ganttGeom(), t = (px - LEFT) / sx + gz.off;
+  gz.k *= f; clampZoom();
+  const g2 = ganttGeom(); gz.off = t - (px - LEFT) / g2.sx; clampZoom();
+  drawGantt(); drawSmem();
+}
+function drawGantt() {
+  if (!SD || !M) return;
+  const dpr = devicePixelRatio || 1, { w, h, rows, sx, X } = ganttGeom();
+  gc.style.height = h + "px";
+  if (gc.width !== w * dpr || gc.height !== h * dpr) { gc.width = w * dpr; gc.height = h * dpr; }
+  gx.setTransform(dpr, 0, 0, dpr, 0, 0); gx.clearRect(0, 0, w, h);
+  gx.font = "11px " + css("--mono"); gx.textBaseline = "middle";
+  const fg = css("--fg"), muted = css("--muted"), idle = css("--dead"), line = css("--line"), panel = css("--panel");
+  for (let r = 0; r < rows; r++) { gx.fillStyle = muted; gx.fillText(M.thread ? "lane" : `warp ${r}`, 4, TOP + r * ROW + ROW / 2); }
+  gx.save(); gx.beginPath(); gx.rect(LEFT, 0, w - LEFT, h); gx.clip();   // the timeline scrolls under the warp labels
+  const onScreen = (a, b) => b >= LEFT && a <= w;
+  if (M.thread) {
+    gx.fillStyle = PAL[0]; gx.fillRect(X(0), TOP + 3, SD.W * sx, ROW - 6);
+    gx.fillStyle = muted; gx.fillText(`${SD.W.toLocaleString()} ops, one after another`, Math.max(LEFT, X(0)) + 6, TOP - 8);
+    gx.restore(); return;
+  }
+  // the task of the node selected in the graph above
+  const selTask = sel >= 0 ? SD.node_task[nodeOf(sel)] : -1;
+  const labels = [];
+  for (let st = 1; st <= M.S; st++) {
+    const x0 = X(M.stageX[st]), sw = M.stageW[st] * sx;
+    if (!onScreen(x0, x0 + sw)) continue;
+    if (st % 2 === 0) { gx.fillStyle = line; gx.globalAlpha = 0.35; gx.fillRect(x0, TOP, sw, rows * ROW); gx.globalAlpha = 1; }
+    for (let r = 0; r < rows; r++) {
+      const cell = M.cells[st][r], y = TOP + r * ROW + 3;
+      for (const g of cell.list) {
+        const bx = x0 + g.start * sx, bw = g.time * sx;
+        if (!onScreen(bx, bx + bw)) continue;
+        gx.fillStyle = shapeColour(g.shape);
+        gx.fillRect(bx, y, Math.max(0.6, bw - 0.4), ROW - 6);
+        if (selTask >= 0 && g.items.some(i => SD.items[i][1] === selTask)) {
+          gx.strokeStyle = css("--accent"); gx.lineWidth = 2; gx.strokeRect(bx, y - 1, Math.max(2, bw), ROW - 4);
+        }
+        if (bw > 26) labels.push([bx, bw, y, g]);
+      }
+      if (cell.time < M.stageW[st]) { gx.fillStyle = idle; gx.globalAlpha = 0.4; gx.fillRect(x0 + cell.time * sx, y + 6, (M.stageW[st] - cell.time) * sx, ROW - 18); gx.globalAlpha = 1; }
+    }
+    const barrier = M.k === 1 || M.sc.sync.includes(st);
+    gx.strokeStyle = M.k === 1 ? muted : fg; gx.lineWidth = M.k === 1 ? 0.6 : 1.4; gx.setLineDash(M.k === 1 ? [2, 3] : []);
+    if (barrier) { gx.beginPath(); gx.moveTo(x0, TOP - 4); gx.lineTo(x0, TOP + rows * ROW); gx.stroke(); }
+    gx.setLineDash([]);
+    if (sw > 16) { gx.fillStyle = muted; gx.fillText(sw > 60 ? `stage ${st}` : st, Math.max(x0, LEFT) + 3, TOP - 8); }
+  }
+  // labels: the statement's expression when it fits, else its root operation; a chip keeps the text readable on any colour
+  gx.font = "10px " + css("--mono");
+  for (const [bx, bw, y, g] of labels) {
+    const full = SD.shape_label[g.shape] + (g.passes > 1 ? ` ×${g.passes}` : ""), root = SD.shape_label[g.shape].split("(")[0];
+    const text = [full, root].find(t => gx.measureText(t).width + 8 <= bw);
+    if (!text) continue;
+    const tw = gx.measureText(text).width, tx = Math.max(bx, LEFT) + 4;
+    if (tx + tw > bx + bw - 2) continue;
+    gx.fillStyle = panel; gx.globalAlpha = 0.82; gx.fillRect(tx - 2, y + 4, tw + 4, ROW - 14); gx.globalAlpha = 1;
+    gx.fillStyle = fg; gx.fillText(text, tx, y + (ROW - 6) / 2);
+  }
+  gx.font = "11px " + css("--mono");
+  if (cellSel) {
+    const { st, r } = cellSel;
+    gx.strokeStyle = css("--merge"); gx.lineWidth = 2;
+    gx.strokeRect(X(M.stageX[st]), TOP + r * ROW + 1, Math.max(3, M.stageW[st] * sx), ROW - 2);
+  }
+  gx.restore();
+  $("gzinfo").textContent = gz.k > 1
+    ? `Zoom ${gz.k.toFixed(gz.k < 10 ? 1 : 0)}× · units ${Math.round(gz.off).toLocaleString()}–${Math.round(gz.off + M.total / gz.k).toLocaleString()} of ${M.total.toLocaleString()} · drag to pan`
+    : "Scroll or use + / − to zoom, drag to pan. Statements are labelled once they are wide enough.";
+}
+function drawSmem() {
+  const dpr = devicePixelRatio || 1, w = mc.clientWidth, h = mc.clientHeight;
+  if (mc.width !== w * dpr || mc.height !== h * dpr) { mc.width = w * dpr; mc.height = h * dpr; }
+  mx.setTransform(dpr, 0, 0, dpr, 0, 0); mx.clearRect(0, 0, w, h);
+  if (!SD || !M || M.thread) return;
+  const a = SD.alive, peak = Math.max(1, ...a), { sx, X } = ganttGeom();
+  mx.font = "11px " + css("--mono"); mx.fillStyle = css("--muted"); mx.textBaseline = "top";
+  mx.fillText(peak.toLocaleString(), 4, 2);
+  mx.save(); mx.beginPath(); mx.rect(LEFT, 0, w - LEFT, h); mx.clip();
+  for (let st = 1; st <= M.S; st++) {
+    const x0 = X(M.stageX[st]), bw = Math.max(1, M.stageW[st] * sx - 1), bh = (h - 14) * a[st] / peak;
+    mx.fillStyle = PAL[2]; mx.fillRect(x0, h - 2 - bh, bw, bh);
+  }
+  mx.restore();
+}
+
+function cellAt(e) {
+  if (!M || M.thread) return null;
+  const b = gc.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top, { sx } = ganttGeom();
+  const r = Math.floor((y - TOP) / ROW), tx = (x - LEFT) / sx + gz.off;
+  if (r < 0 || r >= M.k || x < LEFT) return null;
+  for (let st = 1; st <= M.S; st++) if (tx < M.stageX[st] + M.stageW[st]) {
+    const cell = M.cells[st][r], g = cell.list.find(g => tx >= M.stageX[st] + g.start && tx < M.stageX[st] + g.start + g.time);
+    return { st, r, g };
+  }
+  return null;
+}
+gc.addEventListener("mousemove", e => {
+  const c = cellAt(e), tip = $("tip");
+  if (!c) { tip.hidden = true; return; }
+  const cell = M.cells[c.st][c.r], b = gc.getBoundingClientRect();
+  if (gdrag) { tip.hidden = true; return; }
+  tip.textContent = c.g
+    ? `stage ${c.st} · warp ${c.r}\n${SD.shape_label[c.g.shape]}\nshape #${c.g.shape}: ${c.g.items.length} item${c.g.items.length > 1 ? "s" : ""} × ${c.g.cost} statements\n${c.g.passes} pass${c.g.passes > 1 ? "es" : ""} on ${M.W} lanes = ${c.g.time} units`
+    : `stage ${c.st} · warp ${c.r}\n${cell.list.length ? `idle ${M.stageW[c.st] - cell.time} of ${M.stageW[c.st]} units` : "no work this stage"}`;
+  tip.style.whiteSpace = "pre"; tip.hidden = false;
+  tip.style.left = Math.min(e.clientX - b.left + 12, b.width - 200) + "px"; tip.style.top = (e.clientY - b.top + 12) + "px";
+});
+gc.addEventListener("mouseleave", () => { $("tip").hidden = true; });
+// zoom and pan the schedule horizontally; a click without a drag picks a warp × stage
+let gdrag = null;
+gc.addEventListener("wheel", e => {
+  if (!M || M.thread) return;
+  e.preventDefault();
+  zoomGantt(Math.exp(-wheelPx(e) * 0.002), e.clientX - gc.getBoundingClientRect().left);
+}, { passive: false });
+gc.addEventListener("pointerdown", e => { gdrag = { x: e.clientX, off: gz.off, moved: false }; gc.setPointerCapture(e.pointerId); });
+gc.addEventListener("pointermove", e => {
+  if (!gdrag || !M) return;
+  const dx = e.clientX - gdrag.x;
+  if (Math.abs(dx) > 3) { gdrag.moved = true; gc.classList.add("drag"); }
+  if (gdrag.moved) { gz.off = gdrag.off - dx / ganttGeom().sx; clampZoom(); drawGantt(); drawSmem(); }
+});
+gc.addEventListener("pointerup", e => {
+  const d = gdrag; gdrag = null; gc.classList.remove("drag");
+  if (d && !d.moved) { const c = cellAt(e); if (c) pickCell(c.st, c.r); }
+});
+gc.addEventListener("pointercancel", () => { gdrag = null; gc.classList.remove("drag"); });
+$("gzin").onclick = () => zoomGantt(2, LEFT + (gc.clientWidth - LEFT) / 2);
+$("gzout").onclick = () => zoomGantt(0.5, LEFT + (gc.clientWidth - LEFT) / 2);
+$("gzreset").onclick = () => { gz.k = 1; gz.off = 0; clampZoom(); drawGantt(); drawSmem(); };
+
+function pickCell(st, r) {
+  cellSel = { st, r };
+  const cell = M.cells[st][r];
+  // the graph above rings the scalars this warp computes in this stage
+  HL = new Set();
+  for (const g of cell.list) for (const i of g.items) { const u = G.unitOf(SD.items[i][0]); if (u >= 0) HL.add(u); }
+  const box = $("lanes"); box.className = ""; box.replaceChildren();
+  box.append(dlist([["stage", st], ["warp", r], ["statements", cell.list.length], ["busy", `${cell.time} of ${M.stageW[st]} units`],
+    ["barrier before", M.k === 1 ? "__syncwarp" : M.sc.sync.includes(st) ? "__syncthreads" : "none"]]));
+  const hue = p => `hsl(${Math.round(205 + p * 360 / M.P) % 360} 60% 52%)`;
+  for (const g of cell.list.slice(0, 14)) {
+    const d = document.createElement("div"); d.className = "lane-group";
+    d.append(Object.assign(document.createElement("div"), { className: "hdr", textContent: `shape #${g.shape} · ${g.items.length} items × ${g.cost} stmts · ${g.passes} pass${g.passes > 1 ? "es" : ""}` }));
+    for (let q = 0; q < Math.min(g.passes, 3); q++) {
+      const strip = document.createElement("div"); strip.className = "lanes32";
+      for (let l = 0; l < 32; l++) {
+        const p = Math.floor(l / M.W), sub = l % M.W, item = q * M.W + sub, i = document.createElement("i");
+        if (item < g.items.length) { i.className = "on"; i.style.background = hue(p); i.title = `lane ${l}: problem ${p}, item ${item}`; }
+        else i.title = `lane ${l}: idle in pass ${q + 1}`;
+        strip.append(i);
+      }
+      d.append(strip);
+    }
+    if (g.passes > 3) d.append(Object.assign(document.createElement("div"), { className: "hdr", textContent: `+${g.passes - 3} more passes` }));
+    box.append(d);
+  }
+  if (cell.list.length > 14) box.append(Object.assign(document.createElement("p"), { className: "fine", textContent: `+${cell.list.length - 14} more statements` }));
+  box.append(Object.assign(document.createElement("p"), { className: "fine", textContent: `Colour = problem: the warp's lanes split into ${M.P} group${M.P > 1 ? "s" : ""} of ${M.W}, each running the same statement on its own problem. The scalars are ringed in red in the graph above.` }));
+  drawGantt(); draw();
+}
+for (const id of ["stier", "sk", "sp", "spl"]) $(id).onchange = renderSched;
+new ResizeObserver(() => { drawGantt(); drawSmem(); }).observe(gc);
+
+// ---- loading: one .npz per robot (see the exporter's docstring for the layout) ----
+// .npy: magic, version, header length, a Python-dict header, then the raw little-endian array
+function npy(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength), major = u8[6];
+  const hlen = major === 1 ? dv.getUint16(8, true) : dv.getUint32(8, true), start = major === 1 ? 10 : 12;
+  const header = new TextDecoder().decode(u8.subarray(start, start + hlen));
+  const descr = /'descr':\s*'([^']+)'/.exec(header)[1];
+  const shape = /'shape':\s*\(([^)]*)\)/.exec(header)[1].split(",").map(s => s.trim()).filter(Boolean).map(Number);
+  const Arr = { "<i4": Int32Array, "<i2": Int16Array, "|u1": Uint8Array }[descr];
+  if (!Arr) throw new Error(`unsupported dtype ${descr}`);
+  const body = u8.slice(start + hlen);   // a copy, so the typed array is aligned
+  return { data: new Arr(body.buffer, 0, body.byteLength / Arr.BYTES_PER_ELEMENT), shape };
+}
+// Z: one algorithm's arrays, named as in the robot's .npz ("<algorithm>.<field>"), as flat lists
+const arr = (Z, name) => { const f = Z[name]; if (!f) throw new Error(`missing ${name}`); return f instanceof Int32Array ? f : (Z[name] = Int32Array.from(f)); };
+function ragged(Z, name) {
+  const v = arr(Z, name), off = arr(Z, name + "_off"), out = new Array(off.length - 1);
+  for (let i = 0; i < out.length; i++) out[i] = v.subarray(off[i], off[i + 1]);
+  return out;
+}
+function graphFrom(Z, a) {
+  const nodes = arr(Z, `${a}.nodes`), args = ragged(Z, `${a}.node_args`), n = nodes.length / 10, r = new Array(n);
+  for (let i = 0; i < n; i++) r[i] = [...nodes.subarray(10 * i, 10 * i + 10), ...args[i]];
+  const g = META.graph[a];
+  return { r, e: ragged(Z, `${a}.elems`), so: arr(Z, `${a}.s_op`), ow: arr(Z, `${a}.s_owner`), sa: ragged(Z, `${a}.s_args`),
+           lv: arr(Z, `${a}.s_live`), ev: arr(Z, `${a}.events`), s: g.scalars, l: g.live };
+}
+function schedFrom(Z, a, ms) {
+  const it = arr(Z, `${a}.items`), leaves = ragged(Z, `${a}.item_leaves`), m = it.length / 5, items = new Array(m);
+  for (let i = 0; i < m; i++) items[i] = [it[5 * i], it[5 * i + 1], it[5 * i + 2], it[5 * i + 3], it[5 * i + 4], leaves[i]];
+  const ts = arr(Z, `${a}.task_stage`), T = ts.length / 2, task_stage = {};
+  for (let i = 0; i < T; i++) task_stage[ts[i]] = ts[T + i];
+  const sched = {};
+  for (const k of [1, 2, 4, 8]) for (const pl of ["task", "element"]) {
+    const q = `${a}.sched.${k}.${pl}.`, lay = arr(Z, q + "layout"), layout = {};
+    [1, 2, 4, 8, 16, 32].forEach((P, j) => { layout[P] = [lay[2 * j], lay[2 * j + 1]]; });
+    sched[`${k},${pl}`] = { rank: arr(Z, q + "rank"), sync: [...arr(Z, q + "sync")], layout };
+  }
+  const g = META.graph[a];
+  return { items, stages: ms.stages, W: g.W, D: g.D, node_task: arr(Z, `${a}.node_task`), task_stage, shape_label: ms.shape_label,
+           sched, threshold: ms.threshold };
+}
+let INDEX = null;
+// The page reads web/<robot>/meta.json and web/<robot>/<algorithm>.json, a copy of the robot's .npz
+// (the artifact host serves no archives); the .npz files are what collaborators get.
+// Opened from disk (file://), browsers refuse fetch(); the offline copy ships each file as a
+// script that registers its data in window.__MANTIS under the same path, loaded with a <script> tag.
+const getJSON = async url => {
+  if (location.protocol === "file:") return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = url.replace(/\.json$/, ".js");
+    s.onload = () => { const v = (window.__MANTIS || {})[url]; v ? resolve(v) : reject(new Error(`${url}: no data in ${s.src}`)); };
+    s.onerror = () => reject(new Error(`${s.src} not found next to index.html`));
+    document.head.append(s);
+  });
+  const r = await fetch(url); if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`); return r.json();
+};
+async function robotData(robot, a) {
+  const mk = "m:" + robot, ak = "a:" + robot + "/" + a;
+  if (!CACHE.has(mk)) CACHE.set(mk, await getJSON(`web/${robot}/meta.json`));
+  if (!CACHE.has(ak)) { $("loading").textContent = `Downloading ${robot} / ${a}…`; CACHE.set(ak, await getJSON(`web/${robot}/${a}.json`)); }
+  return { Z: CACHE.get(ak), meta: CACHE.get(mk) };
+}
+async function load(key) {
+  stop(); $("loading").hidden = false; $("loading").textContent = "Loading graph…";
+  try {
+    const [robot, a] = key.split("/"), { Z, meta } = await robotData(robot, a);
+    META = meta;
+    if (!CACHE.has(key)) CACHE.set(key, prepare(graphFrom(Z, a)));
+    D = CACHE.get(key); G = null; expanded.clear(); sel = -1; $("loading").hidden = true;   // G is rebuilt for the new graph below
+    loadSched(Z, a);
+    $("t").max = D.E + 1; build(false); setT(D.E + 1);
+  } catch (err) { $("loading").hidden = false; $("loading").textContent = "Could not load this graph: " + err.message; }
+}
+function fillAlgs(keep) {
+  const algs = INDEX.robots[$("robot").value].algorithms;
+  $("alg").replaceChildren(...algs.map(a => new Option(a, a)));
+  $("alg").value = algs.includes(keep) ? keep : algs[0];
+}
+const current = () => `${$("robot").value}/${$("alg").value}`;
+getJSON("web/index.json").then(idx => {
+  INDEX = idx; readPalette();
+  $("robot").replaceChildren(...Object.entries(idx.robots).map(([r, v]) => new Option(`${r} (${v.n_q} DOF)`, r)));
+  $("robot").value = "baxter"; fillAlgs("traj_collision"); load(current());
+}).catch(err => { $("loading").textContent = "Could not load the robot index: " + err.message; });
+
+$("robot").onchange = () => { fillAlgs($("alg").value); load(current()); };
+$("alg").onchange = () => load(current());
+$("level").onclick = () => { if (expanded.size) expanded.clear(); else D.owned.forEach((o, i) => { if (o.length) expanded.add(i); }); sel = -1; build(false); };
+$("color").onchange = () => { renderLegend(); draw(); };
+$("edges").onchange = draw;
+$("zin").onclick = () => zoomAt(1.5, cv.clientWidth / 2, cv.clientHeight / 2);
+$("zout").onclick = () => zoomAt(1 / 1.5, cv.clientWidth / 2, cv.clientHeight / 2);
+$("zfit").onclick = fit;
+new ResizeObserver(() => draw()).observe(cv);
+const retheme = () => { readPalette(); if (G) { renderLegend(); renderTimeline(); draw(); renderSched(); } };
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", retheme);
+new MutationObserver(retheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>
+</body></html>

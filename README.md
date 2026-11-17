@@ -1,6 +1,6 @@
-# crocket: a algorithmic CUDA trace compiler for rigid-body robotics kernels
+# mantis: a algorithmic CUDA trace compiler for rigid-body robotics kernels
 
-crocket traces rigid-body algorithms, written once at the level of spatial-algebra operations, and
+mantis traces rigid-body algorithms, written once at the level of spatial-algebra operations, and
 compiles them per robot into CUDA for a thread, a warp or a block. Like cricket, it folds the
 robot's constants into straight-line code. Like GRiD, it can also run *inside* one problem in
 parallel, following the kinematic tree. Parallelism tiers are modeled after GLASS.
@@ -24,7 +24,7 @@ the joint limits; the caller runs the loop), and GRiM's LS IK step as `ik_ls_ste
 normal equations over the frame's chain), split into `ik_ls_system` and `ik_ls_solve` so the two
 halves can run at different precisions, with `ik_pose_cost` for the line search.
 
-GRiM's IK kernels (`kernels/ik_crocket`) read everything about the robot from `ik_geometry`: the
+GRiM's IK kernels (`kernels/ik_mantis`) read everything about the robot from `ik_geometry`: the
 stacked pose residual and Jacobian of several frames, the world centres of collision spheres, and
 every joint's world twist, from which a collision gradient is a dot product. `ik_geometry_value`
 is the same without the Jacobian, for line-search trials. With `rot_joint`, a per-call `rot`
@@ -40,19 +40,19 @@ Joints: revolute, continuous (a revolute joint without limits), prismatic, fixed
 ## Usage
 
 ```python
-import crocket
+import mantis
 
-robot = crocket.Robot("panda.urdf")
-src = crocket.generate(robot, {"rnea": {}, "crba": {}, "frame_jacobian": {"frame": "panda_joint7"}})
+robot = mantis.Robot("panda.urdf")
+src = mantis.generate(robot, {"rnea": {}, "crba": {}, "frame_jacobian": {"frame": "panda_joint7"}})
 
-# or pick each algorithm's layout by measurement (cached under ~/.cache/crocket)
-from crocket import tune
-best = tune.tune(crocket.trace(robot, "rnea"), batch=1024)
-src = crocket.generate(robot, {"rnea": {}}, variants={"rnea": [crocket.Variant("thread"), best.variant]})
+# or pick each algorithm's layout by measurement (cached under ~/.cache/mantis)
+from mantis import tune
+best = tune.tune(mantis.trace(robot, "rnea"), batch=1024)
+src = mantis.generate(robot, {"rnea": {}}, variants={"rnea": [mantis.Variant("thread"), best.variant]})
 ```
 
 ```cpp
-namespace r = crocket::robots::panda;
+namespace r = mantis::robots::panda;
 r::rnea_thread<float>(q, qd, qdd, tau, ys);                // one problem per thread
 // warp / block: tables (r::rnea_<tier>_tables elements, once per block) are filled once per
 // launch by r::rnea_<tier>_load_tables(tables, rank, size) from the calling group, then a sync
@@ -65,9 +65,27 @@ r::rnea_block<float>(q, qd, qdd, tau, smem, tables, ys);   // r::rnea_block_prob
 The cooperative tiers end without a barrier. Sync before you read another lane's outputs or reuse
 `smem`.
 
-`crocket.generate(..., kinematics={"frames": [...], "end_effector": ...})` also emits cricket's
+`mantis.generate(..., kinematics={"frames": [...], "end_effector": ...})` also emits cricket's
 float kinematics interface (`frame_poses`, `ee_pose`, `ee_pose_jacobian`), which GRiM's
 `traced=True` builds use.
+
+### Derivative kernels
+
+Any algorithm can be differentiated ahead of time: `order`, `wrt` and `mode` in its options trace
+it, differentiate the SSA graph (`mantis.ad`), and compile the result like any other trace.
+Folding, sparsity and CSE run on primal and derivative together, so structural zeros of a
+Jacobian or Hessian vanish and nothing is stored at runtime. A derivative must be requested at
+build time.
+
+```python
+# tau, d1_tau = d tau / d[q; qd] (n x 2n), d2_tau = its upper triangle (n x (2n)(2n+1)/2)
+src = mantis.generate(robot, {"rnea": {"order": 2, "wrt": ("q", "qd"), "mode": "forward"}})
+```
+
+The functions are named `<alg>_d<order>` (`rnea_d2_thread`). Output `d{k}_y` holds, for each
+entry of `y`, the k-th partials over index tuples `j1 <= ... <= jk` in lexicographic order
+(`mantis.ad.indices(n, k)`). `mode="reverse"` sweeps once per output entry, so it is the
+better choice for scalar or few outputs.
 
 ## Test
 
@@ -82,15 +100,15 @@ group sizes are bit-identical under `-fmad=false`.
 
 ## Benchmarks
 
-The benchmarks are on the [`benchmarks`](https://github.com/CoMMALab/crocket/tree/benchmarks/benchmarks) branch, under
-`benchmarks/`; `bash benchmarks/run_all.sh` reruns them. They compare crocket against pRRTC,
+The benchmarks live in GRiM, under `benchmarks/` (`bash benchmarks/run_all.sh` from the GRiM root
+reruns them), since they time GRiM's motion kernels built on mantis traces. They compare mantis against pRRTC,
 cuRobo, pyroki, GRiD/GRiM and frax on Panda (7 DOF), Baxter (14/15) and Unitree G1 with hands
 (43). All runs are float32 on one RTX A5000, every output is checked against Pinocchio, and the
 times are per call at large batch.
 
 **FK + environment collision, B = 16384 (ms per call)**
 
-| robot | crocket | pRRTC | cuRobo | pyroki | GRiM | GRiM + crocket FK |
+| robot | mantis | pRRTC | cuRobo | pyroki | GRiM | GRiM + mantis FK |
 |---|---|---|---|---|---|---|
 | panda | **0.37** | 0.45 | 4.39 | 7.11 | 0.53 | 0.53 |
 | baxter | **0.53** | 0.75 | 5.90 | 12.89 | 2.20 | 2.33 |
@@ -98,10 +116,10 @@ times are per call at large batch.
 
 **IK, 1024 problems x 8 seeds (ms per call, success rate)**
 
-crocket traces GRiM's own LS algorithm at GRiM's precision (float kinematics, double solve), so
+mantis traces GRiM's own LS algorithm at GRiM's precision (float kinematics, double solve), so
 the column measures tracing alone.
 
-| robot | crocket | GRiM | pyroki |
+| robot | mantis | GRiM | pyroki |
 |---|---|---|---|
 | panda | **14.3 (95.4%)** | 70.0 (95.4%) | 842.1 (98.2%) |
 | baxter | **14.3 (95.8%)** | 124.0 (95.8%) | 2807.4 (98.9%) |
@@ -109,24 +127,24 @@ the column measures tracing alone.
 
 **Inverse dynamics (RNEA), B = 16384 (ms per call)**
 
-| robot | crocket | GRiD | frax |
+| robot | mantis | GRiD | frax |
 |---|---|---|---|
 | panda | **0.045** | 1.715 | 1.365 |
 | baxter | **0.059** | 3.634 | 3.106 |
 | g1 | **0.473** | 12.733 | 11.108 |
 
-Fastest per robot in bold. At small batch crocket gives some of this back: pRRTC is 1.5x faster
-on FK + collision at B <= 1024 for Panda and Baxter, GRiD is mostly faster at B <= 128, most of
-all on g1 dynamics derivatives, and GRiM's block tier is faster on Panda IK at 1 x 8.
+Fastest per robot in bold. At small batch mantis gives some of this back: GRiD is mostly faster
+at B <= 128, most of all on g1 dynamics derivatives, and GRiM's block tier is faster on Panda IK
+at 1 x 8.
 
-Trace the whole computation. Swapping crocket's FK into GRiM's hand-written kernels gained
+Trace the whole computation. Swapping mantis's FK into GRiM's hand-written kernels gained
 1.2-3x on IK, nothing on collision, and nothing on FK alone, where pRRTC and cuRobo stay fastest;
 tracing GRiM's whole IK step gained 4.9-8.7x at equal algorithm and precision.
 
-GRiM now runs every IK method on crocket's `ik_geometry`. Over 4 robots, 3 target sets and 8
+GRiM now runs every IK method on mantis's `ik_geometry`. Over 4 robots, 3 target sets and 8
 methods, at 16384 problems x 8 seeds, the float32 build wins 75 of 78 cells against the
 hand-written kernels' fastest tier: 73 at the thread tier and the 2 analytic IK cells at the block
 tier. The median speedup is 13x: 15-80x for LS, SQP and HJCD LM without collision, 4-10x for
 them with collision, 3-17x for DLS, MPPI and canonical IK. The hand-written kernel keeps
-multi-end-effector DLS (crocket is 1.3-1.8x slower there). The full
+multi-end-effector DLS (mantis is 1.3-1.8x slower there). The full
 table is GRiM's `test/benchmarks/IK_RESULTS.md`.

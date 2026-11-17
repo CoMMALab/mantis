@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-import crocket
-from crocket.robot import GRID_DIR
+import mantis
+from mantis.robot import GRID_DIR
 
 RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 URDFS = {name: RESOURCES / f"{name}.urdf" for name in ("panda", "fr3", "ur5", "baxter", "fetch", "pr2")}
@@ -21,11 +21,11 @@ SMALL = ["panda", "fr3", "ur5", "grid_iiwa14", "grid_go2"]  # for the expensive 
 
 
 @lru_cache(maxsize=None)
-def robot(name: str) -> crocket.Robot:
-    return crocket.Robot(URDFS[name], name=name)
+def robot(name: str) -> mantis.Robot:
+    return mantis.Robot(URDFS[name], name=name)
 
 
-def inputs(r: crocket.Robot, batch: int = 4, seed: int = 0) -> dict[str, np.ndarray]:
+def inputs(r: mantis.Robot, batch: int = 4, seed: int = 0) -> dict[str, np.ndarray]:
     """Random configurations within joint limits, then a zero (often singular) one with zero
     velocity, where conditioning bugs show."""
     rng = np.random.default_rng(seed)
@@ -39,7 +39,7 @@ def inputs(r: crocket.Robot, batch: int = 4, seed: int = 0) -> dict[str, np.ndar
             "tau": rng.uniform(-5, 5, (batch, r.n_q))}
 
 
-def options(r: crocket.Robot, name: str) -> dict:
+def options(r: mantis.Robot, name: str) -> dict:
     """Trace options: frames are every joint frame, the end-effector the deepest movable joint."""
     if name == "frame_poses":
         return {"frames": tuple(r.frames)}
@@ -54,7 +54,7 @@ def options(r: crocket.Robot, name: str) -> dict:
     return {}
 
 
-def traj_set(r: crocket.Robot) -> dict:
+def traj_set(r: mantis.Robot) -> dict:
     """GRiM TrajCollision-shaped rows (two spheres per joint frame, one on the base, the last
     joint's row left empty), self pairs between rows two or more apart, two obstacles of each kind."""
     base = next(iter(sorted(r.root_links)))
@@ -64,10 +64,10 @@ def traj_set(r: crocket.Robot) -> dict:
     rows.append((base, ((0.02, -0.01, 0.05, 0.08),)))
     pairs = tuple((i, j) for i in range(len(rows)) for j in range(i + 2, len(rows)))
     return {"rows": tuple(rows), "pairs": pairs, "n_spheres": 2, "n_capsules": 2, "n_boxes": 2,
-            "n_halfspaces": 2}
+            "n_halfspaces": 2, "n_cylinders": 2}
 
 
-def sphere_set(r: crocket.Robot) -> tuple:
+def sphere_set(r: mantis.Robot) -> tuple:
     """Two off-centre spheres on every joint frame and one on the base: every frame's pose and
     every centre component reach the margin."""
     base = next(iter(sorted(r.root_links)))

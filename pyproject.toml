@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "crocket"
+name = "mantis"
 version = "0.2.0"
 description = "Trace compiler for GRiD/GLASS rigid-body kernels: thread, warp and block CUDA from one algorithm source"
 readme = "README.md"
@@ -18,12 +18,12 @@ classifiers = [
 
 [project.optional-dependencies]
 # URDFParser (and RBDReference, the oracle) come from GRiD: an installed GRiD, else the GRiD
-# checkout next to crocket (CROCKET_GRID_PATH overrides). Pinocchio is the second oracle.
+# checkout next to mantis (MANTIS_GRID_PATH overrides). Pinocchio is the second oracle.
 test = ["pytest>=7.0", "pin", "pytest-gpu-proof>=0.4.1"]
 
 [tool.setuptools]
 package-dir = { "" = "python" }
-packages = ["crocket"]
+packages = ["mantis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,6 +38,6 @@ mode = "local"
 output = "gpu-proof.json"
 github_username = "saiccoumar"
 required_marker = "gpu_proof"
-fingerprint_paths = ["python/crocket", "pyproject.toml", "resources", "tests"]
+fingerprint_paths = ["python/mantis", "pyproject.toml", "resources", "tests"]
 fingerprint_excluded_paths = ["gpu-proof.json"]
 max_age_days = 30

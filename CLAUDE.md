@@ -1,9 +1,9 @@
-# CLAUDE.md: crocket
+# CLAUDE.md: mantis
 
-## What crocket does
+## What mantis does
 
-crocket is a trace compiler for rigid-body robotics kernels. You write an algorithm once in Python
-(RNEA, CRBA, ABA, FK, Jacobians, fused FK + collision, an IK step). crocket then runs it on one
+mantis is a trace compiler for rigid-body robotics kernels. You write an algorithm once in Python
+(RNEA, CRBA, ABA, FK, Jacobians, fused FK + collision, an IK step). mantis then runs it on one
 robot and emits CUDA specialized to that robot. Robot constants become literals and loops over joints
 are unrolled. Multiplications by zero and dead outputs are removed. The output is straight-line code
 for each problem: a thread, warp or block runs one problem with no loops over joints, no branches and
@@ -11,7 +11,7 @@ no table lookups. GRiM builds every IK kernel and every trajectory optimizer on 
 
 ## Two-stage compilation
 
-1. **Stage 1, crocket (Python, at build time).**
+1. **Stage 1, mantis (Python, at build time).**
    - **Trace:** `algorithms.py` / `trace.py` run the algorithm over traced spatial types, which
      records it.
    - **Optimize:** `ir.py` holds the recording as a two-level SSA graph. The upper level is spatial
@@ -23,11 +23,11 @@ no table lookups. GRiM builds every IK kernel and every trajectory optimizer on 
    - **Emit:** `cuda.py` emits one header per robot: `<alg>_thread / _split / _warp / _block`,
      templated on `T`. Traces over the statement budget are split into `__noinline__` stages.
 2. **Stage 2, nvcc (inside the consumer's kernel).** The header is `#include`d into a kernel
-   written by hand, such as GRiM's `kernels/ik_crocket/*.cu`. That kernel owns everything that
+   written by hand, such as GRiM's `kernels/ik_mantis/*.cu`. That kernel owns everything that
    depends on data at runtime: iteration loops, accept/reject, early exit and convergence. nvcc
    compiles the traced step and the solver loop together, so the robot math is inlined into the
    loop. `tune.py` / `harness.py` compile candidate layouts, validate them and time them. The
-   fastest layout for each robot is cached under `~/.cache/crocket`.
+   fastest layout for each robot is cached under `~/.cache/mantis`.
 
 The split rule: fixed-size math goes in the trace (stage 1), and control flow that branches on data
 stays in CUDA (stage 2). Trace one whole iteration (`ik_lm_step`, `ik_geometry`), not just its FK.
@@ -35,7 +35,7 @@ The benchmarks show tracing only the FK leaves most of the speedup unused.
 
 ## Analysis tools: Grama's parallel computing model
 
-`python/crocket/parallel_analysis.py` (test: `tests/test_parallel_analysis.py`) measures a traced
+`python/mantis/parallel_analysis.py` (test: `tests/test_parallel_analysis.py`) measures a traced
 program with the metrics of Grama, Gupta, Karypis and Kumar, *Introduction to Parallel Computing*.
 The thread tier is the serial baseline and a `schedule.build` schedule is the parallel one. The unit
 is folded scalar ops, the same cost model the scheduler balances. It only reads the IR and schedule
@@ -56,7 +56,7 @@ and changes nothing.
   only pay off when the batch leaves cores idle.
 
 ```bash
-python -m crocket.parallel_analysis rnea panda.urdf baxter.urdf --units 4 8 16 32 64 --out rnea.json
+python -m mantis.parallel_analysis rnea panda.urdf baxter.urdf --units 4 8 16 32 64 --out rnea.json
 ```
 
 The barrier and shared-memory costs (`SYNC_COST`, `SMEM_COST`) and `CORES` are estimates. Use the
