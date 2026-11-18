@@ -13,7 +13,6 @@ parent coordinates); ``X @ v`` is ``motion_transform``, ``X.T @ f`` is
 
 from __future__ import annotations
 
-import functools
 import inspect
 from dataclasses import dataclass
 
@@ -587,10 +586,27 @@ def _flatten(value) -> np.ndarray:
     raise TypeError(f"cannot output {type(value).__name__}")
 
 
-def algorithm(inputs: tuple, outputs: tuple[str, ...]):
-    """Register ``fn(robot, *inputs, **options)`` as a traceable algorithm. An input is a name
-    (``n_q`` scalars) or ``(name, options -> length)``."""
+def algorithm(inputs: tuple, outputs: tuple[str, ...], name: str | None = None, register: bool = True):
+    """Make ``fn(robot, *inputs, **options)`` a traceable algorithm. An input is a name
+    (``n_q`` scalars) or ``(name, options -> length)``. The returned function carries its
+    :class:`Algorithm` as ``fn.algorithm`` and can be passed to ``mantis.trace`` / ``mantis.generate``
+    in place of a name, so user code defines algorithms outside this package (build them from
+    :mod:`mantis.lib`). ``register=False`` keeps it out of the global ``ALGORITHMS`` table."""
     def wrap(fn):
-        ALGORITHMS[fn.__name__] = Algorithm(fn.__name__, fn, inputs, outputs)
-        return functools.wraps(fn)(fn)
+        alg = Algorithm(name or fn.__name__, fn, inputs, outputs)
+        if register:
+            ALGORITHMS[alg.name] = alg
+        fn.algorithm = alg
+        return fn
     return wrap
+
+
+def resolve(alg) -> "Algorithm":
+    """An :class:`Algorithm` from a registered name, an ``Algorithm`` or an ``@algorithm`` function."""
+    if isinstance(alg, Algorithm):
+        return alg
+    if isinstance(alg, str):
+        return ALGORITHMS[alg]
+    if hasattr(alg, "algorithm"):
+        return alg.algorithm
+    raise TypeError(f"not a mantis algorithm: {alg!r}")

@@ -21,6 +21,11 @@ uses every core at E = 1, so a cooperative tier only pays off when the batch lea
 CLI::
 
     python -m mantis.parallel_analysis rnea panda.urdf baxter.urdf --units 4 8 16 32 64 --out rnea.json
+    # every emittable layout (thread / warp / block, k, P): tables, batch model, pick per batch size
+    python -m mantis.parallel_analysis frame_poses panda.urdf --options '{"frames": ["panda_joint7"]}' --variants
+    python -m mantis.parallel_analysis my_pkg.algs:my_alg panda.urdf --variants --objective latency
+
+From Python, :func:`dump` prints the same for any traced program.
 """
 
 from __future__ import annotations
@@ -58,11 +63,13 @@ def work_span(program: Program) -> tuple[int, int]:
 
 
 def analyze(program: Program, units: int, threshold: int = 8, sync_cost: float = SYNC_COST,
-            smem_cost: float = SMEM_COST, placement: str = "element", diverge: int = 32) -> dict:
-    """All metrics for ``program`` scheduled on ``units`` lanes."""
+            smem_cost: float = SMEM_COST, placement: str = "element", diverge: int = 32,
+            sc: sched_mod.Schedule | None = None, ws: tuple[int, int] | None = None) -> dict:
+    """All metrics for ``program`` scheduled on ``units`` lanes (``sc``: that schedule, prebuilt;
+    ``ws``: ``work_span(program)``, precomputed)."""
     g = program.g
-    W, D = work_span(program)
-    sc = sched_mod.build(program, units, threshold, placement=placement)
+    W, D = ws or work_span(program)
+    sc = sc or sched_mod.build(program, units, threshold, placement=placement)
     t_p, t_mimd, lane_work, smem = 0.0, 0.0, 0, 0.0
     for st in range(1, sc.stages + 1):
         lanes: dict[int, list] = {}
@@ -168,14 +175,217 @@ def report(algorithm: str, programs: dict[str, Program], units: list[int], thres
             "batch": {name: [batch(p, B, units, cores, **kw) for B in batches] for name, p in programs.items()}}
 
 
+# --- Per-variant tables: what each emittable layout would do, without emitting it --------------
+
+def register_pressure(program: Program) -> int:
+    """Peak number of simultaneously live scalars of the thread tier, in its statement order (SSA
+    order): a lower bound on its registers per thread. Past ``device.REGS_PER_THREAD`` (255) the
+    thread tier spills, and long before that it limits residency."""
+    g = program.g
+    live = g.live(program.flat_outputs)
+    ids = [s for s in np.flatnonzero(live) if g.op[s] not in ("const", "in")]
+    idset, last = set(ids), {}
+    for s in ids:
+        for a in g.args[s]:
+            if a in idset:                 # constants and inputs are not held in registers here
+                last[a] = s
+    for o in program.flat_outputs:
+        if int(o) in idset:
+            last[int(o)] = len(g.op)      # outputs stay live to the end
+    ends: dict[int, int] = {}
+    for v, e in last.items():
+        ends[e] = ends.get(e, 0) + 1
+    cur = peak = 0
+    for s in ids:
+        cur += 1                           # s is defined ...
+        peak = max(peak, cur)
+        cur -= ends.get(s, 0)              # ... and the values last read by s die
+    return peak
+
+
+def layouts(ks=(1, 2, 4, 8), problems=(1, 2, 4, 8, 16, 32)) -> list[dict]:
+    """Every layout :func:`mantis.cuda.emit` can produce, with the lane model of each:
+
+    - ``thread``: one lane per problem (the serial baseline, ``T = W``).
+    - P = 32 (warp k = 1, block k): one problem per lane, the k warps of the group are its ranks;
+      each rank is a whole warp running one ``case``, so no SIMT divergence (``diverge = 1``).
+    - P < 32: 32 / P lanes per problem in a warp (warp tier) or 32 k / P in a block, the 32 / P
+      lanes a warp holds of one problem diverge (``diverge = 32 / P``)."""
+    from . import cuda
+    out = [dict(variant=cuda.Variant("thread"), units=1, diverge=1, problems_per_group=32, threads=32)]
+    for P in problems:
+        for k in ks:
+            tier = "warp" if k == 1 else "block"
+            v = cuda.Variant(tier, 32 * k if tier == "block" else 1, problems=P)
+            units, diverge = (k, 1) if P == 32 else (32 * k // P, 32 // P)
+            out.append(dict(variant=v, units=units, diverge=diverge, problems_per_group=P, threads=32 * k))
+    return out
+
+
+def _name(v) -> str:
+    if v.tier == "thread":
+        return "thread"
+    k = v.units // 32 if v.tier == "block" else 1
+    return f"{v.tier} k={k} P={v.problems}"
+
+
+def variant_table(program: Program, ks=(1, 2, 4, 8), problems=(1, 2, 4, 8, 16, 32), threshold: int = 8,
+                  placement: str = "element", sync_cost: float = SYNC_COST, smem_cost: float = SMEM_COST,
+                  exact_smem: bool = False, dev=None, itemsize: int = 4, log=None) -> dict:
+    """Grama metrics of ``program`` for every layout of :func:`layouts`, plus what decides whether
+    the layout can run well: shared memory per block and residency (blocks / threads per SM).
+
+    Shared memory is the schedule's slots per problem x the problems a group holds (x 4 warps per
+    block at the warp tier, mantis's launch default); P < 32 layouts also keep index / constant
+    tables per block that only emission sizes, so with ``exact_smem`` the emitter's own layout
+    (:func:`mantis.cuda.layout`, slow on big traces) replaces the estimate. A P = 32 layout over
+    the shared-memory limit still runs with its scratch in global memory (flagged ``global``)."""
+    from . import cuda, device as device_mod
+    dev = dev or device_mod.target()
+    ws = work_span(program)
+    W, D = ws
+    regs = register_pressure(program)
+    scheds: dict[int, sched_mod.Schedule] = {}
+    rows = []
+    for L in layouts(ks, problems):
+        v, units = L["variant"], L["units"]
+        if v.tier == "thread":
+            m = dict(T_p=float(W), T_ideal=float(W), schedule_gap=1.0, speedup=1.0, efficiency=1.0,
+                     cost=float(W), cost_ratio=1.0, stages=1, syncs=0,
+                     overhead_pct={k: 0.0 for k in ("recomputation", "smem", "barriers", "divergence", "idle")})
+            per_block, tables = 0, 0
+        else:
+            if units not in scheds:
+                t0 = __import__("time").time()
+                scheds[units] = sched_mod.build(program, units, threshold, placement=placement)
+                if log:
+                    log(f"  schedule on {units} ranks: {scheds[units].stages} stages ({__import__('time').time() - t0:.0f} s)")
+            sc = scheds[units]
+            m = analyze(program, units, threshold, sync_cost, smem_cost, placement, L["diverge"], sc=sc, ws=ws)
+            if exact_smem:
+                scratch, tables = cuda.layout(program, v, itemsize)
+            else:
+                scratch = cuda.smem(sc, "split") if v.problems == 32 else max(sc.n_slots, 1) * v.problems
+                tables = 0 if v.problems == 32 else None   # None: not sized without emission
+            warps_per_block = cuda.WARP_TIER_WARPS_PER_BLOCK if v.tier == "warp" else 1
+            per_block = (scratch * warps_per_block + (tables or 0)) * itemsize
+        threads_block = L["threads"] * (cuda.WARP_TIER_WARPS_PER_BLOCK if v.tier == "warp" else 1)
+        # residency per SM: registers bind the thread tier (estimate), shared memory the others
+        if v.tier == "thread":
+            r = min(max(regs, 32), device_mod.REGS_PER_THREAD)
+            r = -(-r // 8) * 8
+            threads_sm = min(dev.threads_per_sm, dev.regs_per_sm // r // 32 * 32)
+            where = "regs" + (" (spills)" if regs > device_mod.REGS_PER_THREAD else "")
+        elif per_block <= dev.smem_per_block:
+            blocks = dev.smem_per_sm // (per_block + dev.smem_reserved_per_block) if per_block else 32
+            threads_sm = min(dev.threads_per_sm, blocks * threads_block)
+            where = "shared"
+        elif v.problems == 32:
+            threads_sm = dev.threads_per_sm          # scratch in global memory: not smem-bound
+            where = "global"
+        else:
+            threads_sm, where = 0, "does not fit"
+        rows.append({**m, **dict(name=_name(v), variant=v, lanes_per_problem=units, diverge=L["diverge"],
+                                 problems_per_group=L["problems_per_group"], threads_per_group=L["threads"],
+                                 smem_per_block=per_block, tables_known=tables is not None, scratch_in=where,
+                                 threads_per_sm=threads_sm)})
+    return {"W": W, "D": D, "parallelism": W / D if D else 0.0, "regs_thread": regs, "device": dev.name,
+            "sms": dev.sms, "rows": rows}
+
+
+def batch_table(table: dict, batches, cores_per_sm: int = 128) -> list[dict]:
+    """Per batch size ``B`` and layout: latency (``T_p``, one problem alone), makespan and throughput.
+
+    ``threads = ceil(B / problems per group) x threads per group`` lanes are occupied; the GPU holds
+    ``threads_per_sm x SMs`` of them at once and issues ``cores_per_sm x SMs`` lane-steps per step, so
+
+        makespan = max(waves x T_p, threads x T_p / cores),   waves = ceil(threads / resident)
+
+    (residency bound vs issue bound; the second is p T_p of the batch over the cores, idle lanes
+    included). Units are the analysis' folded scalar ops ("steps"); compare layouts, not seconds."""
+    sms = table["sms"] or 64
+    cores = cores_per_sm * sms
+    out = []
+    for B in batches:
+        per = []
+        for r in table["rows"]:
+            if r["threads_per_sm"] <= 0:
+                per.append(dict(name=r["name"], feasible=False)); continue
+            threads = -(-B // r["problems_per_group"]) * r["threads_per_group"]
+            resident = r["threads_per_sm"] * sms
+            waves = -(-threads // resident)
+            span = max(waves * r["T_p"], threads * r["T_p"] / cores)
+            per.append(dict(name=r["name"], feasible=True, latency=r["T_p"], waves=waves, makespan=span,
+                            throughput=B / span, occupancy=min(1.0, threads / resident)))
+        ok = [x for x in per if x["feasible"]]
+        out.append(dict(B=B, rows=per, best_throughput=min(ok, key=lambda x: x["makespan"])["name"],
+                        best_latency=min(ok, key=lambda x: x["latency"])["name"]))
+    return out
+
+
+def dump(program: Program, batches=(1, 32, 256, 1024, 4096, 16384, 65536, 262144), objective: str = "both",
+         file=None, **kw) -> dict:
+    """Print the Grama tables of ``program`` (any traced program, user algorithms included) and
+    the layout to pick per batch size for ``objective`` ("throughput", "latency" or "both")."""
+    import sys
+    f = file or sys.stdout
+    pr = lambda *a: print(*a, file=f, flush=True)  # noqa: E731
+    pr(f"# {program.name} on {program.robot.name}")
+    t = variant_table(program, log=pr, **kw)
+    pr(f"W = {t['W']} scalar ops, D = {t['D']} (span), W/D = {t['parallelism']:.1f} (max useful lanes per problem); "
+       f"thread tier: >= {t['regs_thread']} live values (registers/thread) on {t['device']} ({t['sms']} SMs)\n")
+    pr("## Strong scaling per layout (one problem; S = T_s / T_p, E = S / p, p T_p / T_s = cost ratio)")
+    hdr = (f"{'layout':18s} {'p':>4s} {'div':>3s} {'T_p':>9s} {'T_ideal':>9s} {'gap':>5s} {'S':>6s} {'E':>6s} "
+           f"{'pTp/Ts':>7s} {'stages':>6s} {'syncs':>5s} {'smem/blk':>9s} {'scratch':>12s} {'thr/SM':>6s} | overhead %")
+    pr(hdr); pr("-" * len(hdr))
+    for r in t["rows"]:
+        smem = f"{r['smem_per_block'] / 1024:7.1f}K" + ("" if r["tables_known"] else "+")
+        pct = " ".join(f"{k[:5]}={v:3.0f}" for k, v in r["overhead_pct"].items())
+        pr(f"{r['name']:18s} {r['lanes_per_problem']:4d} {r['diverge']:3d} {r['T_p']:9.0f} {r['T_ideal']:9.0f} "
+           f"{r['schedule_gap']:5.2f} {r['speedup']:6.2f} {r['efficiency']:6.3f} {r['cost_ratio']:7.2f} "
+           f"{r['stages']:6d} {r['syncs']:5d} {smem:>9s} {r['scratch_in']:>12s} {r['threads_per_sm']:6d} | {pct}")
+    pr("  (smem '+': plus the P < 32 tables, sized only by emission: run with exact_smem / --exact-smem)\n")
+    bt = batch_table(t, batches)
+    pr("## Batch model (makespan in steps; throughput = problems per 1k steps; occ = resident fraction)")
+    names = [r["name"] for r in t["rows"]]
+    pr(f"{'layout':18s} " + " ".join(f"{'B=' + str(b['B']):>17s}" for b in bt))
+    for i, n in enumerate(names):
+        cells = []
+        for b in bt:
+            x = b["rows"][i]
+            cells.append(f"{'—':>17s}" if not x["feasible"] else f"{x['makespan']:9.3g} {1e3 * x['throughput']:7.3g}")
+        pr(f"{n:18s} " + " ".join(cells))
+    pr("")
+    pr("## Pick")
+    for b in bt:
+        line = f"B={b['B']:<7d}"
+        if objective in ("throughput", "both"):
+            line += f" throughput: {b['best_throughput']:18s}"
+        if objective in ("latency", "both"):
+            line += f" latency: {b['best_latency']}"
+        pr(line)
+    return {"table": t, "batch": bt}
+
+
 def save(result: dict, path: str | Path) -> None:
     Path(path).write_text(json.dumps(result, indent=2))
 
 
+def _algorithm(spec: str):
+    """A registered name, or ``module:attr`` naming an ``@mantis.algorithm`` function (or a
+    zero-argument factory returning one): user algorithms need no edit to mantis."""
+    from .trace import resolve
+    from . import algorithms  # noqa: F401  (registers the algorithms)
+    if ":" not in spec:
+        return resolve(spec)
+    import importlib
+    mod, attr = spec.split(":", 1)
+    obj = getattr(importlib.import_module(mod), attr)
+    return resolve(obj if hasattr(obj, "algorithm") else obj())
+
+
 def main(argv=None) -> None:
     from .robot import Robot
-    from .trace import ALGORITHMS
-    from . import algorithms  # noqa: F401  (registers the algorithms)
 
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("algorithm")
@@ -188,8 +398,23 @@ def main(argv=None) -> None:
     ap.add_argument("--batch", type=int, nargs="*", default=[1, 32, 256, 1024, 4096, 16384, 65536])
     ap.add_argument("--cores", type=int, default=CORES)
     ap.add_argument("--out")
+    ap.add_argument("--options", default="{}", help="trace options as JSON (e.g. frames, n_boxes)")
+    ap.add_argument("--variants", action="store_true",
+                    help="per emittable layout (thread / warp / block, k, P): Grama tables, the batch "
+                         "model and the pick per batch size, instead of the per-unit report")
+    ap.add_argument("--objective", choices=["throughput", "latency", "both"], default="both")
+    ap.add_argument("--ks", type=int, nargs="+", default=[1, 2, 4, 8])
+    ap.add_argument("--problems", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32])
+    ap.add_argument("--exact-smem", action="store_true", help="size shared memory by emitting each layout")
     a = ap.parse_args(argv)
-    programs = {Path(u).stem: ALGORITHMS[a.algorithm].trace(Robot(u, name=Path(u).stem)) for u in a.urdfs}
+    alg = _algorithm(a.algorithm)
+    opts = json.loads(a.options)
+    programs = {Path(u).stem: alg.trace(Robot(u, name=Path(u).stem), **opts) for u in a.urdfs}
+    if a.variants:
+        for p in programs.values():
+            dump(p, a.batch, a.objective, ks=tuple(a.ks), problems=tuple(a.problems), threshold=a.threshold,
+                 sync_cost=a.sync_cost, smem_cost=a.smem_cost, exact_smem=a.exact_smem)
+        return
     result = report(a.algorithm, programs, a.units, a.threshold, a.target, a.sync_cost, a.smem_cost,
                     a.batch, a.cores)
     for name, pts in result["strong_scaling"].items():
